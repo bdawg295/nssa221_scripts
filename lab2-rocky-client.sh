@@ -18,10 +18,6 @@ read -rp "Enter domain join user (e.g. Administrator): " USER
 read -rsp "Enter password for $USER: " PASS
 echo
 
-echo "[*] Setting DNS to $DCIP ..."
-nmcli connection modify "$(nmcli -t -f NAME con show --active)" ipv4.dns "$DCIP"
-nmcli connection up "$(nmcli -t -f NAME con show --active)"
-
 echo "[*] Installing domain join packages..."
 dnf install -y realmd sssd oddjob oddjob-mkhomedir adcli samba-common-tools krb5-workstation
 
