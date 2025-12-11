@@ -56,12 +56,15 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
     [Security.Principal.WindowsBuiltInRole] "Administrator"
 )) {
     Write-Host "ERROR: This script MUST be run in an elevated PowerShell session." -ForegroundColor Red
+    Write-Host "TROUBLESHOOT: Right-click PowerShell and choose 'Run as administrator'." -ForegroundColor Yellow
     return
 }
 
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host " Windows Server DC / AD / DNS / DHCP / OU / User / GPO setup" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "If something fails, look for RED 'ERROR' lines and 'TROUBLESHOOT' hints." -ForegroundColor Yellow
 Write-Host ""
 
 #------------------------------------------------#
@@ -86,13 +89,17 @@ if ($IsDC) {
         $DefaultNetBIOS = $adDomain.NetBIOSName
 
         Write-Host "[+] Existing domain detected:" -ForegroundColor Green
-        Write-Host "    FQDN : $DomainName" -ForegroundColor Green
-        Write-Host "    DN   : $DomainDN" -ForegroundColor Green
+        Write-Host "    FQDN   : $DomainName" -ForegroundColor Green
+        Write-Host "    DN     : $DomainDN" -ForegroundColor Green
         Write-Host "    NetBIOS: $DefaultNetBIOS" -ForegroundColor Green
         Write-Host ""
     } catch {
-        Write-Host "ERROR: This machine thinks it's a DC but AD cmdlets failed. Fix manually." -ForegroundColor Red
+        Write-Host "ERROR: This machine thinks it's a DC but AD cmdlets failed." -ForegroundColor Red
         Write-Host $_.Exception.Message -ForegroundColor Red
+        Write-Host "TROUBLESHOOT:" -ForegroundColor Yellow
+        Write-Host " - Make sure AD DS role is actually installed." -ForegroundColor Yellow
+        Write-Host " - If this is right after promotion, reboot and run the script again." -ForegroundColor Yellow
+        Write-Host " - If AD is broken, you may need to re-image or re-promote." -ForegroundColor Yellow
         return
     }
 }
@@ -119,8 +126,17 @@ else {
 #----------------------------#
 if (Prompt-YesNo "Install AD DS, DNS, and DHCP roles on this server?") {
     Write-Host "[*] Installing AD-Domain-Services, DNS, and DHCP Server roles..." -ForegroundColor Cyan
-    Install-WindowsFeature -Name AD-Domain-Services, DNS, DHCP -IncludeManagementTools | Out-Null
-    Write-Host "[+] Roles installed (or already present)." -ForegroundColor Green
+    try {
+        Install-WindowsFeature -Name AD-Domain-Services, DNS, DHCP -IncludeManagementTools | Out-Null
+        Write-Host "[+] Roles installed (or already present)." -ForegroundColor Green
+    }
+    catch {
+        Write-Host "ERROR: Failed to install one or more roles." -ForegroundColor Red
+        Write-Host $_.Exception.Message -ForegroundColor Red
+        Write-Host "TROUBLESHOOT:" -ForegroundColor Yellow
+        Write-Host " - Make sure this is Windows Server, not a client OS." -ForegroundColor Yellow
+        Write-Host " - Check Server Manager to see if roles are partially installed." -ForegroundColor Yellow
+    }
     Write-Host ""
 }
 
@@ -147,7 +163,13 @@ if (-not $IsDC -and (Prompt-YesNo "Promote this server to a NEW forest/domain ($
         return
     }
     catch {
-        Write-Host "ERROR during domain promotion: $_" -ForegroundColor Red
+        Write-Host "ERROR during domain promotion:" -ForegroundColor Red
+        Write-Host $_.Exception.Message -ForegroundColor Red
+        Write-Host "TROUBLESHOOT:" -ForegroundColor Yellow
+        Write-Host " - Make sure this server has a STATIC IP." -ForegroundColor Yellow
+        Write-Host " - Preferred DNS on this NIC should be this server's own IP." -ForegroundColor Yellow
+        Write-Host " - Check that no other DC for '$DomainName' already exists on the network." -ForegroundColor Yellow
+        Write-Host " - If this partially promoted, re-image is usually faster for an exam." -ForegroundColor Yellow
         return
     }
 }
@@ -163,24 +185,37 @@ if (Prompt-YesNo "Configure DHCP scope, exclusions, and options?") {
     }
     catch {
         Write-Host "ERROR: DhcpServer PowerShell module not available. Is the DHCP role installed?" -ForegroundColor Red
+        Write-Host $_.Exception.Message -ForegroundColor Red
+        Write-Host "TROUBLESHOOT:" -ForegroundColor Yellow
+        Write-Host " - Make sure you answered Y to install DHCP, or install via Server Manager." -ForegroundColor Yellow
+        Write-Host " - You can still continue with AD/OUs/users/GPOs without DHCP." -ForegroundColor Yellow
         return
     }
 
     Write-Host ""
     Write-Host "=== DHCP Server Configuration ===" -ForegroundColor Cyan
 
-    $ServerIP      = Read-Host "Enter this server's STATIC IPv4 address (e.g. 192.168.10.10)"
+    $ServerIP       = Read-Host "Enter this server's STATIC IPv4 address (e.g. 192.168.10.10)"
     $ScopeNetworkID = Read-Host "Enter network ID for the scope (e.g. 192.168.10.0)"
-    $ScopeName     = Read-Host "Enter a name for the DHCP scope (e.g. LabScope)"
-    $ScopeStart    = Read-Host "Enter FIRST dynamic IP (e.g. 192.168.10.11)"
-    $ScopeEnd      = Read-Host "Enter LAST dynamic IP  (e.g. 192.168.10.253)"
-    $SubnetMask    = Read-Host "Enter subnet mask (e.g. 255.255.255.0)"
+    $ScopeName      = Read-Host "Enter a name for the DHCP scope (e.g. LabScope)"
+    $ScopeStart     = Read-Host "Enter FIRST dynamic IP (e.g. 192.168.10.11)"
+    $ScopeEnd       = Read-Host "Enter LAST dynamic IP  (e.g. 192.168.10.253)"
+    $SubnetMask     = Read-Host "Enter subnet mask (e.g. 255.255.255.0)"
 
     # Authorize DHCP server in AD if needed
     if (-not (Get-DhcpServerInDC -ErrorAction SilentlyContinue | Where-Object { $_.IpAddress -eq $ServerIP })) {
         Write-Host "[*] Authorizing this DHCP server in Active Directory..." -ForegroundColor Cyan
-        Add-DhcpServerInDC -DnsName $env:COMPUTERNAME -IpAddress $ServerIP
-        Write-Host "[+] DHCP server authorized in AD." -ForegroundColor Green
+        try {
+            Add-DhcpServerInDC -DnsName $env:COMPUTERNAME -IpAddress $ServerIP
+            Write-Host "[+] DHCP server authorized in AD." -ForegroundColor Green
+        }
+        catch {
+            Write-Host "ERROR: Failed to authorize DHCP server in AD." -ForegroundColor Red
+            Write-Host $_.Exception.Message -ForegroundColor Red
+            Write-Host "TROUBLESHOOT:" -ForegroundColor Yellow
+            Write-Host " - Ensure this server is a DC and can contact a writable domain controller." -ForegroundColor Yellow
+            Write-Host " - Check network connectivity and DNS." -ForegroundColor Yellow
+        }
     }
     else {
         Write-Host "[!] DHCP server already authorized in AD; skipping authorization." -ForegroundColor Yellow
@@ -189,15 +224,24 @@ if (Prompt-YesNo "Configure DHCP scope, exclusions, and options?") {
     # Create scope if not present
     if (-not (Get-DhcpServerv4Scope -ScopeId $ScopeNetworkID -ErrorAction SilentlyContinue)) {
         Write-Host "[*] Creating DHCP scope '$ScopeName' ($ScopeStart - $ScopeEnd)..." -ForegroundColor Cyan
-        New-DhcpServerv4Scope `
-            -Name $ScopeName `
-            -StartRange $ScopeStart `
-            -EndRange $ScopeEnd `
-            -SubnetMask $SubnetMask `
-            -ScopeId $ScopeNetworkID `
-            -State Active | Out-Null
+        try {
+            New-DhcpServerv4Scope `
+                -Name $ScopeName `
+                -StartRange $ScopeStart `
+                -EndRange $ScopeEnd `
+                -SubnetMask $SubnetMask `
+                -ScopeId $ScopeNetworkID `
+                -State Active | Out-Null
 
-        Write-Host "[+] Scope created and activated." -ForegroundColor Green
+            Write-Host "[+] Scope created and activated." -ForegroundColor Green
+        }
+        catch {
+            Write-Host "ERROR: Failed to create DHCP scope." -ForegroundColor Red
+            Write-Host $_.Exception.Message -ForegroundColor Red
+            Write-Host "TROUBLESHOOT:" -ForegroundColor Yellow
+            Write-Host " - Make sure ScopeId is the NETWORK ID (e.g. 192.168.10.0), not the server IP." -ForegroundColor Yellow
+            Write-Host " - Ensure Start/End IPs are within the same subnet and in correct order." -ForegroundColor Yellow
+        }
     }
     else {
         Write-Host "[!] Scope with ScopeId $ScopeNetworkID already exists; skipping creation." -ForegroundColor Yellow
@@ -211,12 +255,28 @@ if (Prompt-YesNo "Configure DHCP scope, exclusions, and options?") {
             $ExEnd   = Read-Host "  Exclusion END IP   (e.g. 192.168.10.10)"
             Write-Host "  [*] Adding exclusion range $ExStart - $ExEnd ..." -ForegroundColor Cyan
 
-            Add-DhcpServerv4ExclusionRange `
-                -ScopeId $ScopeNetworkID `
-                -StartRange $ExStart `
-                -EndRange $ExEnd
+            try {
+                # Optional sanity check: exclusion inside scope
+                if (([ipaddress]$ExStart).Address -lt ([ipaddress]$ScopeStart).Address -or
+                    ([ipaddress]$ExEnd).Address   -gt ([ipaddress]$ScopeEnd).Address) {
 
-            Write-Host "  [+] Exclusion range added." -ForegroundColor Green
+                    Write-Host "  ERROR: Exclusion range is outside the scope range. Skipping." -ForegroundColor Red
+                    Write-Host "  TROUBLESHOOT: Make sure exclusions are within $ScopeStart - $ScopeEnd." -ForegroundColor Yellow
+                }
+                else {
+                    Add-DhcpServerv4ExclusionRange `
+                        -ScopeId $ScopeNetworkID `
+                        -StartRange $ExStart `
+                        -EndRange $ExEnd
+                    Write-Host "  [+] Exclusion range added." -ForegroundColor Green
+                }
+            }
+            catch {
+                Write-Host "  ERROR: Failed to add exclusion range." -ForegroundColor Red
+                Write-Host $_.Exception.Message -ForegroundColor Red
+                Write-Host "  TROUBLESHOOT: Check that the exclusion range does not overlap with other exclusions." -ForegroundColor Yellow
+            }
+
             $more = Prompt-YesNo "  Add another exclusion range?"
         }
     }
@@ -243,8 +303,11 @@ if (Prompt-YesNo "Configure DHCP scope, exclusions, and options?") {
         Write-Host "[+] DHCP configuration complete." -ForegroundColor Green
     }
     catch {
-        Write-Host "ERROR while setting DHCP options. Check that ScopeId $ScopeNetworkID exists and IPs are valid." -ForegroundColor Red
+        Write-Host "ERROR while setting DHCP options." -ForegroundColor Red
         Write-Host $_.Exception.Message -ForegroundColor Red
+        Write-Host "TROUBLESHOOT:" -ForegroundColor Yellow
+        Write-Host " - Verify ScopeId, gateway, and DNS IPs are valid and in the correct subnet." -ForegroundColor Yellow
+        Write-Host " - Make sure the DHCP scope actually exists and is Active." -ForegroundColor Yellow
     }
 
     Write-Host ""
@@ -258,6 +321,10 @@ try {
 }
 catch {
     Write-Host "ERROR: ActiveDirectory module not available. Is AD DS installed?" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host "TROUBLESHOOT:" -ForegroundColor Yellow
+    Write-Host " - Make sure this server is a DC and AD DS role is installed." -ForegroundColor Yellow
+    Write-Host " - If you just promoted to DC, reboot and rerun this script." -ForegroundColor Yellow
     return
 }
 
@@ -271,11 +338,20 @@ if (Prompt-YesNo "Create one or more Organizational Units (OUs)?") {
 
         if (-not (Get-ADOrganizationalUnit -LDAPFilter "(ou=$ouName)" -SearchBase $DomainDN -ErrorAction SilentlyContinue)) {
             Write-Host "[*] Creating OU '$ouName' at $ouPath ..." -ForegroundColor Cyan
-            New-ADOrganizationalUnit `
-                -Name $ouName `
-                -Path $DomainDN `
-                -ProtectedFromAccidentalDeletion $true | Out-Null
-            Write-Host "[+] OU '$ouName' created." -ForegroundColor Green
+            try {
+                New-ADOrganizationalUnit `
+                    -Name $ouName `
+                    -Path $DomainDN `
+                    -ProtectedFromAccidentalDeletion $true | Out-Null
+                Write-Host "[+] OU '$ouName' created." -ForegroundColor Green
+            }
+            catch {
+                Write-Host "ERROR: Failed to create OU '$ouName'." -ForegroundColor Red
+                Write-Host $_.Exception.Message -ForegroundColor Red
+                Write-Host "TROUBLESHOOT:" -ForegroundColor Yellow
+                Write-Host " - Ensure the DN '$DomainDN' is correct." -ForegroundColor Yellow
+                Write-Host " - Check for typos in the OU name." -ForegroundColor Yellow
+            }
         }
         else {
             Write-Host "[!] OU '$ouName' already exists; skipping." -ForegroundColor Yellow
@@ -297,10 +373,12 @@ if (Prompt-YesNo "Create a batch of numbered users (name1, name2, name3, ...)?")
     # Basic check that OU exists
     if (-not (Get-ADOrganizationalUnit -Identity $TargetOUPath -ErrorAction SilentlyContinue)) {
         Write-Host "ERROR: OU '$TargetOUPath' not found. Create it first." -ForegroundColor Red
+        Write-Host "TROUBLESHOOT: Double-check the OU name matches exactly what you created." -ForegroundColor Yellow
     }
     else {
         $BaseName    = Read-Host "Enter base username (e.g. 'user' => user1, user2...)"
-        $StartIndex  = [int](Read-Host "Enter starting number (e.g. 1)")
+        $StartIndex  = [int](Read-Host "Enter starting number (e.g. 1)"
+        )
         $UserCount   = [int](Read-Host "How many users do you want to create?")
         $PasswordSec = Read-Host "Enter password for ALL created users" -AsSecureString
 
@@ -335,7 +413,9 @@ if (Prompt-YesNo "Create a batch of numbered users (name1, name2, name3, ...)?")
                 Write-Host "[+] Created user $sam" -ForegroundColor Green
             }
             catch {
-                Write-Host "[!] Could not create $sam (maybe already exists): $($_.Exception.Message)" -ForegroundColor Yellow
+                Write-Host "[!] Could not create $sam (maybe already exists)." -ForegroundColor Yellow
+                Write-Host $_.Exception.Message -ForegroundColor Yellow
+                Write-Host "TROUBLESHOOT: Check for duplicate usernames, or invalid password complexity." -ForegroundColor Yellow
             }
         }
 
@@ -348,7 +428,9 @@ if (Prompt-YesNo "Create a batch of numbered users (name1, name2, name3, ...)?")
                     Write-Host "  [+] $u added to $GroupName" -ForegroundColor Green
                 }
                 catch {
-                    Write-Host "  [!] Failed to add $u to $GroupName : $($_.Exception.Message)" -ForegroundColor Yellow
+                    Write-Host "  [!] Failed to add $u to $GroupName." -ForegroundColor Yellow
+                    Write-Host $_.Exception.Message -ForegroundColor Yellow
+                    Write-Host "  TROUBLESHOOT: Ensure the group '$GroupName' exists and name is exact." -ForegroundColor Yellow
                 }
             }
         }
@@ -359,6 +441,79 @@ if (Prompt-YesNo "Create a batch of numbered users (name1, name2, name3, ...)?")
 }
 
 #---------------------------------#
+# 5b) Single AD User Creation     #
+#---------------------------------#
+if (Prompt-YesNo "Create a single Active Directory user?") {
+
+    Write-Host ""
+    Write-Host "=== Single AD User Creation ===" -ForegroundColor Cyan
+
+    # Username / Full name
+    $UserName = Read-Host "Enter sAMAccountName (username)"
+    $FullName = Read-Host "Enter full name for the user"
+
+    # OU Input
+    $OUInput = Read-Host "Enter FULL OU DN (e.g. OU=Weezer,$DomainDN)"
+
+    if (-not (Get-ADOrganizationalUnit -Identity $OUInput -ErrorAction SilentlyContinue)) {
+        Write-Host "ERROR: OU '$OUInput' not found. User creation aborted." -ForegroundColor Red
+        Write-Host "TROUBLESHOOT: Copy the DN exactly from ADUC if needed (e.g. right-click OU → Properties)." -ForegroundColor Yellow
+    }
+    else {
+        # Password
+        $PasswordSec = Read-Host "Enter password for this user" -AsSecureString
+
+        # Build UPN
+        $UPN = "$UserName@$DomainName"
+
+        Write-Host "[*] Creating AD user '$UserName' in '$OUInput'..." -ForegroundColor Cyan
+
+        try {
+            New-ADUser `
+                -Name $FullName `
+                -SamAccountName $UserName `
+                -UserPrincipalName $UPN `
+                -Path $OUInput `
+                -AccountPassword $PasswordSec `
+                -Enabled $true `
+                -PasswordNeverExpires $false `
+                -ChangePasswordAtLogon $false `
+                -ErrorAction Stop
+
+            Write-Host "[+] Successfully created user '$UserName'." -ForegroundColor Green
+        }
+        catch {
+            Write-Host "[!] ERROR creating user '$UserName'." -ForegroundColor Red
+            Write-Host $_.Exception.Message -ForegroundColor Red
+            Write-Host "TROUBLESHOOT:" -ForegroundColor Yellow
+            Write-Host " - Check password complexity rules." -ForegroundColor Yellow
+            Write-Host " - Check for existing user with same sAMAccountName/UPN." -ForegroundColor Yellow
+        }
+
+        # Optional group membership
+        if (Prompt-YesNo "Add this user to group(s)?") {
+            $GroupList = Read-Host "Enter group names separated by commas"
+            $Groups = $GroupList.Split(",") | ForEach-Object { $_.Trim() }
+
+            foreach ($G in $Groups) {
+                try {
+                    Add-ADGroupMember -Identity $G -Members $UserName -ErrorAction Stop
+                    Write-Host "  [+] Added '$UserName' to '$G'" -ForegroundColor Green
+                }
+                catch {
+                    Write-Host "  [!] Could not add to group '$G'." -ForegroundColor Yellow
+                    Write-Host $_.Exception.Message -ForegroundColor Yellow
+                    Write-Host "  TROUBLESHOOT: Group name must be exact and exist in AD." -ForegroundColor Yellow
+                }
+            }
+        }
+
+        Write-Host "[+] Single-user creation complete." -ForegroundColor Green
+        Write-Host ""
+    }
+}
+
+#---------------------------------#
 # 6) GPOs & links (optional)      #
 #---------------------------------#
 try {
@@ -366,6 +521,8 @@ try {
 }
 catch {
     Write-Host "WARNING: GroupPolicy module not available. Skipping GPO section." -ForegroundColor Yellow
+    Write-Host $_.Exception.Message -ForegroundColor Yellow
+    Write-Host "TROUBLESHOOT: Make sure Group Policy Management features/RSAT are installed on this server." -ForegroundColor Yellow
     return
 }
 
@@ -379,26 +536,45 @@ if (Prompt-YesNo "Create & link a 'Deny Control Panel' GPO at the DOMAIN level?"
     $gpo = Get-GPO -Name $GpoName -ErrorAction SilentlyContinue
     if (-not $gpo) {
         Write-Host "[*] Creating GPO '$GpoName'..." -ForegroundColor Cyan
-        $gpo = New-GPO -Name $GpoName -Comment "Created by DC setup script to restrict Control Panel"
-        Write-Host "[+] GPO '$GpoName' created." -ForegroundColor Green
+        try {
+            $gpo = New-GPO -Name $GpoName -Comment "Created by DC setup script to restrict Control Panel"
+            Write-Host "[+] GPO '$GpoName' created." -ForegroundColor Green
+        }
+        catch {
+            Write-Host "ERROR: Failed to create GPO '$GpoName'." -ForegroundColor Red
+            Write-Host $_.Exception.Message -ForegroundColor Red
+        }
     }
     else {
         Write-Host "[!] GPO '$GpoName' already exists; reusing." -ForegroundColor Yellow
     }
 
     Write-Host "[*] Linking GPO '$GpoName' to domain '$DomainName'..." -ForegroundColor Cyan
-    New-GPLink -Name $GpoName -Target $DomainName -Enforced:$false -ErrorAction SilentlyContinue | Out-Null
+    try {
+        New-GPLink -Name $GpoName -Target $DomainName -Enforced:$false -ErrorAction SilentlyContinue | Out-Null
+    }
+    catch {
+        Write-Host "ERROR: Failed to link GPO to domain." -ForegroundColor Red
+        Write-Host $_.Exception.Message -ForegroundColor Red
+        Write-Host "TROUBLESHOOT: Ensure the domain FQDN '$DomainName' is correct." -ForegroundColor Yellow
+    }
 
     # Configure NoControlPanel = 1 (HKCU)
     Write-Host "[*] Setting registry value to prohibit Control Panel access..." -ForegroundColor Cyan
-    Set-GPRegistryValue `
-        -Name $GpoName `
-        -Key "HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" `
-        -ValueName "NoControlPanel" `
-        -Type DWord `
-        -Value 1
+    try {
+        Set-GPRegistryValue `
+            -Name $GpoName `
+            -Key "HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" `
+            -ValueName "NoControlPanel" `
+            -Type DWord `
+            -Value 1
+        Write-Host "[+] GPO '$GpoName' configured and linked to domain." -ForegroundColor Green
+    }
+    catch {
+        Write-Host "ERROR: Failed to set registry value in GPO." -ForegroundColor Red
+        Write-Host $_.Exception.Message -ForegroundColor Red
+    }
 
-    Write-Host "[+] GPO '$GpoName' configured and linked to domain." -ForegroundColor Green
     Write-Host ""
 }
 
@@ -415,6 +591,7 @@ if (Prompt-YesNo "Create & link a DESKTOP WALLPAPER GPO for a specific OU?") {
 
     if (-not (Get-ADOrganizationalUnit -Identity $TargetOUDN2 -ErrorAction SilentlyContinue)) {
         Write-Host "ERROR: OU '$TargetOUDN2' not found. Cannot link wallpaper GPO." -ForegroundColor Red
+        Write-Host "TROUBLESHOOT: Verify the OU name is correct and exists." -ForegroundColor Yellow
     }
     else {
         $WallpaperPath = Read-Host "Enter UNC path to wallpaper image (e.g. \\SERVER\Share\wallpaper.jpg)"
@@ -424,35 +601,201 @@ if (Prompt-YesNo "Create & link a DESKTOP WALLPAPER GPO for a specific OU?") {
         $gpo2 = Get-GPO -Name $GpoName2 -ErrorAction SilentlyContinue
         if (-not $gpo2) {
             Write-Host "[*] Creating GPO '$GpoName2'..." -ForegroundColor Cyan
-            $gpo2 = New-GPO -Name $GpoName2 -Comment "Created by DC setup script for OU wallpaper"
-            Write-Host "[+] GPO '$GpoName2' created." -ForegroundColor Green
+            try {
+                $gpo2 = New-GPO -Name $GpoName2 -Comment "Created by DC setup script for OU wallpaper"
+                Write-Host "[+] GPO '$GpoName2' created." -ForegroundColor Green
+            }
+            catch {
+                Write-Host "ERROR: Failed to create wallpaper GPO." -ForegroundColor Red
+                Write-Host $_.Exception.Message -ForegroundColor Red
+            }
         }
         else {
             Write-Host "[!] GPO '$GpoName2' already exists; reusing." -ForegroundColor Yellow
         }
 
         Write-Host "[*] Linking GPO '$GpoName2' to OU '$TargetOUDN2'..." -ForegroundColor Cyan
-        New-GPLink -Name $GpoName2 -Target $TargetOUDN2 -Enforced:$false -ErrorAction SilentlyContinue | Out-Null
+        try {
+            New-GPLink -Name $GpoName2 -Target $TargetOUDN2 -Enforced:$false -ErrorAction SilentlyContinue | Out-Null
+        }
+        catch {
+            Write-Host "ERROR: Failed to link wallpaper GPO to OU." -ForegroundColor Red
+            Write-Host $_.Exception.Message -ForegroundColor Red
+        }
 
         # Configure wallpaper settings
         Write-Host "[*] Setting wallpaper registry values in GPO..." -ForegroundColor Cyan
-        Set-GPRegistryValue `
-            -Name $GpoName2 `
-            -Key "HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\System" `
-            -ValueName "Wallpaper" `
-            -Type String `
-            -Value $WallpaperPath
+        try {
+            Set-GPRegistryValue `
+                -Name $GpoName2 `
+                -Key "HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\System" `
+                -ValueName "Wallpaper" `
+                -Type String `
+                -Value $WallpaperPath
 
-        Set-GPRegistryValue `
-            -Name $GpoName2 `
-            -Key "HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\System" `
-            -ValueName "WallpaperStyle" `
-            -Type String `
-            -Value $Style
+            Set-GPRegistryValue `
+                -Name $GpoName2 `
+                -Key "HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\System" `
+                -ValueName "WallpaperStyle" `
+                -Type String `
+                -Value $Style
 
-        Write-Host "[+] Wallpaper GPO '$GpoName2' configured and linked to OU '$TargetOUName2'." -ForegroundColor Green
-        Write-Host "    Remember to run 'gpupdate /force' on a client in that OU." -ForegroundColor Yellow
+            Write-Host "[+] Wallpaper GPO '$GpoName2' configured and linked to OU '$TargetOUName2'." -ForegroundColor Green
+            Write-Host "    Remember to run 'gpupdate /force' on a client in that OU." -ForegroundColor Yellow
+        }
+        catch {
+            Write-Host "ERROR: Failed to set wallpaper registry values in GPO." -ForegroundColor Red
+            Write-Host $_.Exception.Message -ForegroundColor Red
+        }
     }
+}
+
+#---------------------------------#
+# 7) DNS Record Management (A/CNAME/PTR)
+#---------------------------------#
+if (Prompt-YesNo "Create DNS A, CNAME, and/or PTR records for domain-joined computers?") {
+
+    Write-Host ""
+    Write-Host "=== DNS Record Management ===" -ForegroundColor Cyan
+    try {
+        Import-Module DnsServer -ErrorAction Stop
+    }
+    catch {
+        Write-Host "ERROR: DnsServer module not available. Is the DNS role installed?" -ForegroundColor Red
+        Write-Host $_.Exception.Message -ForegroundColor Red
+        Write-Host "TROUBLESHOOT: DNS role must be installed on this server to manage zones/records." -ForegroundColor Yellow
+        return
+    }
+
+    # Ask how many records to create
+    $RecordCount = [int](Read-Host "How many computer DNS records would you like to create?")
+
+    for ($i = 1; $i -le $RecordCount; $i++) {
+
+        Write-Host ""
+        Write-Host "=== Record $i ===" -ForegroundColor Cyan
+
+        # Basic info
+        $Hostname = Read-Host "Enter HOSTNAME (e.g., client1)"
+        $IPv4     = Read-Host "Enter IPv4 address for $Hostname"
+
+        # Validate forward zone
+        if (-not (Get-DnsServerZone -Name $DomainName -ErrorAction SilentlyContinue)) {
+            Write-Host "ERROR: Forward lookup zone '$DomainName' does not exist." -ForegroundColor Red
+            Write-Host "TROUBLESHOOT: Check DNS Manager to confirm the zone name matches your domain." -ForegroundColor Yellow
+            continue
+        }
+
+        #--------------------------------------------#
+        # Create A Record
+        #--------------------------------------------#
+        if (Prompt-YesNo "Create A record for $Hostname.$DomainName → $IPv4 ?") {
+            try {
+                # Optional: skip if already exists
+                $existingA = Get-DnsServerResourceRecord -ZoneName $DomainName -Name $Hostname -ErrorAction SilentlyContinue
+                if ($existingA) {
+                    Write-Host "[!] A record for $Hostname already exists; skipping." -ForegroundColor Yellow
+                }
+                else {
+                    Add-DnsServerResourceRecordA `
+                        -Name $Hostname `
+                        -ZoneName $DomainName `
+                        -IPv4Address $IPv4 `
+                        -ErrorAction Stop
+
+                    Write-Host "[+] A record created: $Hostname.$DomainName → $IPv4" -ForegroundColor Green
+                }
+            }
+            catch {
+                Write-Host "[!] Failed to create A record." -ForegroundColor Yellow
+                Write-Host $_.Exception.Message -ForegroundColor Yellow
+                Write-Host "TROUBLESHOOT: Check IP format and that the name is not already in use." -ForegroundColor Yellow
+            }
+        }
+
+        #--------------------------------------------#
+        # Create CNAME
+        #--------------------------------------------#
+        if (Prompt-YesNo "Create CNAME alias for this host?") {
+            $Alias = Read-Host "Enter alias (e.g., www, fileserver, ssh)"
+            try {
+                Add-DnsServerResourceRecordCName `
+                    -Name $Alias `
+                    -HostNameAlias "$Hostname.$DomainName" `
+                    -ZoneName $DomainName `
+                    -ErrorAction Stop
+
+                Write-Host "[+] CNAME created: $Alias.$DomainName → $Hostname.$DomainName" -ForegroundColor Green
+            }
+            catch {
+                Write-Host "[!] Failed to create CNAME." -ForegroundColor Yellow
+                Write-Host $_.Exception.Message -ForegroundColor Yellow
+                Write-Host "TROUBLESHOOT: Make sure the alias name is not already an existing A record." -ForegroundColor Yellow
+            }
+        }
+
+        #--------------------------------------------#
+        # Create PTR (reverse lookup)
+        #--------------------------------------------#
+        if (Prompt-YesNo "Create PTR (reverse) record for $IPv4 ?") {
+
+            # Auto-generate zone name based on IP (x.y.z.in-addr.arpa)
+            $ipParts = $IPv4.Split(".")
+            if ($ipParts.Count -ne 4) {
+                Write-Host "ERROR: IPv4 address format invalid. Skipping PTR." -ForegroundColor Red
+                continue
+            }
+
+            $ReverseZone = "$($ipParts[2]).$($ipParts[1]).$($ipParts[0]).in-addr.arpa"
+
+            # Check for reverse zone
+            if (-not (Get-DnsServerZone -Name $ReverseZone -ErrorAction SilentlyContinue)) {
+                Write-Host "[!] Reverse zone '$ReverseZone' does not exist." -ForegroundColor Yellow
+
+                if (Prompt-YesNo "Create reverse lookup zone $ReverseZone ?") {
+                    try {
+                        Add-DnsServerPrimaryZone `
+                            -NetworkId "$($ipParts[0]).$($ipParts[1]).$($ipParts[2])" `
+                            -PrefixLength 24 `
+                            -ReplicationScope "Forest" `
+                            -ErrorAction Stop
+
+                        Write-Host "[+] Reverse zone created: $ReverseZone" -ForegroundColor Green
+                    }
+                    catch {
+                        Write-Host "[!] Failed to create reverse zone." -ForegroundColor Red
+                        Write-Host $_.Exception.Message -ForegroundColor Red
+                        Write-Host "TROUBLESHOOT: Check that the network ID is correct (e.g. 192.168.10)." -ForegroundColor Yellow
+                        continue
+                    }
+                }
+                else {
+                    Write-Host "[!] Skipping PTR record (zone missing)." -ForegroundColor Yellow
+                    continue
+                }
+            }
+
+            $PTRName = $ipParts[3]   # last octet
+
+            try {
+                Add-DnsServerResourceRecordPtr `
+                    -Name $PTRName `
+                    -ZoneName $ReverseZone `
+                    -PtrDomainName "$Hostname.$DomainName" `
+                    -ErrorAction Stop
+
+                Write-Host "[+] PTR created: $IPv4 → $Hostname.$DomainName" -ForegroundColor Green
+            }
+            catch {
+                Write-Host "[!] Failed to create PTR." -ForegroundColor Yellow
+                Write-Host $_.Exception.Message -ForegroundColor Yellow
+                Write-Host "TROUBLESHOOT: Make sure no conflicting PTR already exists for this IP." -ForegroundColor Yellow
+            }
+        }
+    }
+
+    Write-Host ""
+    Write-Host "[+] DNS record management complete." -ForegroundColor Green
 }
 
 Write-Host ""
