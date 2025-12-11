@@ -1,14 +1,15 @@
 #!/bin/bash
 
 # ==============================================================================
-# RIT NSSA221 - Robust Unified Server Setup Script (v2.1)
+# RIT NSSA221 - Robust Unified Server Setup Script (v3.0)
 # Target System: Rocky Linux 8
 #
 # INCLUDES:
-# 1. AUTOMATIC: VS Code + Python Setup (No Copilot)
+# 1. AUTOMATIC: VS Code + Python Setup
 # 2. MENU: RAID Configuration (Lab 04)
 # 3. MENU: Apache Virtual Web Server (Lab 06)
 # 4. MENU: Rsync Daemon Configuration (Lab 05)
+# 5. MENU: Samba File Sharing (Lab 05)
 # ==============================================================================
 
 # --- Helper Functions ---
@@ -46,7 +47,7 @@ setup_vscode_env() {
     log "STARTING AUTOMATIC SETUP: VS Code & Python Environment"
     echo "----------------------------------------------------------------"
 
-    # 1. Install Python 3 (Required for the Python Extension)
+    # 1. Install Python 3
     log "Ensuring Python 3 is installed..."
     dnf install -y python3 python3-pip > /dev/null
     check_command
@@ -63,12 +64,11 @@ setup_vscode_env() {
 
     # 3. Install VS Code
     log "Installing Visual Studio Code..."
-    dnf check-update > /dev/null 2>&1 || true # Ignore update return codes
+    dnf check-update > /dev/null 2>&1 || true 
     dnf install -y code > /dev/null
     check_command
 
     # 4. Install Extensions (Python Only)
-    # TRICKY PART: We must install extensions for the REAL user, not just root.
     REAL_USER=$SUDO_USER
     
     if [ -z "$REAL_USER" ]; then
@@ -79,13 +79,11 @@ setup_vscode_env() {
         TARGET_USER="$REAL_USER"
     fi
 
-    # Define the install command function to run as the target user
     install_ext() {
         EXTENSION=$1
         if [ "$TARGET_USER" == "root" ]; then
             code --install-extension $EXTENSION --force --no-sandbox --user-data-dir /root/.vscode-root
         else
-            # Run as the normal user
             sudo -u $TARGET_USER code --install-extension $EXTENSION --force
         fi
     }
@@ -100,7 +98,7 @@ setup_vscode_env() {
 }
 
 # ==============================================================================
-# MODULE 1: RAID CONFIGURATION (LAB 04)
+# MODULE 1: RAID CONFIGURATION (Lab 04)
 # ==============================================================================
 setup_raid() {
     echo "----------------------------------------------------------------"
@@ -224,7 +222,7 @@ GDISK
 }
 
 # ==============================================================================
-# MODULE 2: APACHE VIRTUAL WEB SERVER (LAB 06)
+# MODULE 2: APACHE VIRTUAL WEB SERVER (Lab 06)
 # ==============================================================================
 setup_webserver() {
     echo "----------------------------------------------------------------"
@@ -311,7 +309,7 @@ EOF
 }
 
 # ==============================================================================
-# MODULE 3: RSYNC DAEMON (LAB 05 - Activity 7)
+# MODULE 3: RSYNC DAEMON (Lab 05 - Activity 7)
 # ==============================================================================
 setup_rsyncd() {
     echo "----------------------------------------------------------------"
@@ -365,6 +363,114 @@ EOF
 }
 
 # ==============================================================================
+# MODULE 4: SAMBA FILE SHARING (Lab 05 - Activity 5)
+# ==============================================================================
+setup_samba() {
+    echo "----------------------------------------------------------------"
+    log "STARTING MODULE: SAMBA FILE SHARING (Lab 05)"
+    echo "----------------------------------------------------------------"
+
+    # --- Install Packages ---
+    log "Installing Samba packages..."
+    dnf install -y samba samba-common samba-client policycoreutils-python-utils > /dev/null
+    check_command
+
+    # --- Firewall ---
+    log "Configuring Firewall for Samba..."
+    firewall-cmd --add-service=samba --permanent > /dev/null 2>&1
+    firewall-cmd --reload > /dev/null 2>&1
+
+    # --- Directory Setup ---
+    # Lab 5 uses /media/samba/ramones. We assume /media/samba exists from RAID setup.
+    # If not, we create it just in case.
+    SHARE_DIR="/media/samba/ramones"
+    
+    log "Creating shared directory: $SHARE_DIR"
+    mkdir -p $SHARE_DIR
+    
+    # --- Group Setup ---
+    # Lab 5 requires a 'writers' group [cite: 1675]
+    if ! getent group writers > /dev/null; then
+        log "Creating group 'writers'..."
+        groupadd writers
+    else
+        log "Group 'writers' already exists."
+    fi
+
+    # --- Permissions ---
+    # Lab 5 requires group ownership and write permissions [cite: 1696-1699]
+    log "Setting directory permissions..."
+    chgrp writers $SHARE_DIR
+    chmod g+rwx $SHARE_DIR
+    # SGID is good practice here (2770), but lab explicitly asked for chmod g+rwx
+    chmod 2770 $SHARE_DIR
+
+    # --- SELinux Context ---
+    log "Setting SELinux context (samba_share_t)..."
+    semanage fcontext -a -t samba_share_t "${SHARE_DIR}(/.*)?" 2>/dev/null || true
+    restorecon -Rv $SHARE_DIR > /dev/null
+
+    # --- User Creation Loop ---
+    echo ""
+    echo "--- Samba User Setup ---"
+    echo "Lab 5 suggests creating users like: joey, johnny, deedee"
+    read -p "How many Samba users do you want to create? " USER_COUNT
+
+    if [[ "$USER_COUNT" =~ ^[0-9]+$ ]]; then
+        for ((i=1; i<=USER_COUNT; i++)); do
+            echo ""
+            read -p "Enter username #$i: " SMB_USER
+            
+            # Create system user (nologin) 
+            if id "$SMB_USER" &>/dev/null; then
+                log "System user $SMB_USER already exists."
+            else
+                useradd -s /sbin/nologin $SMB_USER
+                log "Created system user $SMB_USER"
+            fi
+
+            # Add to 'writers' group [cite: 1679]
+            usermod -aG writers $SMB_USER
+            log "Added $SMB_USER to 'writers' group."
+
+            # Set Samba Password [cite: 1689]
+            log "Set Samba password for $SMB_USER:"
+            smbpasswd -a $SMB_USER
+        done
+    else
+        warn "Invalid number. Skipping user creation."
+    fi
+
+    # --- Config smb.conf ---
+    SMB_CONF="/etc/samba/smb.conf"
+    
+    if grep -q "\[ramones\]" "$SMB_CONF"; then
+        warn "Share [ramones] already exists in smb.conf. Skipping config append."
+    else
+        log "Appending [ramones] share to $SMB_CONF..."
+        # Configuration per Lab 5 
+        cat <<EOF >> "$SMB_CONF"
+
+[ramones]
+comment = Blitzkrieg Bop
+path = $SHARE_DIR
+read only = no
+write list = @writers
+EOF
+    fi
+
+    # --- Validation & Start ---
+    log "Validating Samba config..."
+    testparm -s > /dev/null
+    
+    log "Starting Samba services..."
+    systemctl enable --now smb nmb
+    systemctl restart smb nmb
+    
+    log "Samba Configuration Complete."
+}
+
+# ==============================================================================
 # MAIN EXECUTION
 # ==============================================================================
 
@@ -382,21 +488,24 @@ while true; do
     echo "1. Run RAID Setup (Lab 04)"
     echo "2. Run Virtual Web Server Setup (Lab 06)"
     echo "3. Run Rsync Daemon Setup (Lab 05)"
-    echo "4. Run ALL Server Modules (1, 2 & 3)"
-    echo "5. Exit"
+    echo "4. Run Samba File Sharing Setup (Lab 05)"
+    echo "5. Run ALL Server Modules (1-4)"
+    echo "6. Exit"
     echo "==================================================="
-    read -p "Select an option [1-5]: " choice
+    read -p "Select an option [1-6]: " choice
 
     case $choice in
         1) setup_raid ;;
         2) setup_webserver ;;
         3) setup_rsyncd ;;
-        4) 
+        4) setup_samba ;;
+        5) 
            setup_raid
            setup_webserver
            setup_rsyncd
+           setup_samba
            ;;
-        5) 
+        6) 
            log "Exiting."
            exit 0 
            ;;
