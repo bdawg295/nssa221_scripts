@@ -1,9 +1,14 @@
 #!/bin/bash
 
 # ==============================================================================
-# RIT NSSA221 - Robust Unified Server Setup Script
+# RIT NSSA221 - Robust Unified Server Setup Script (v2.1)
 # Target System: Rocky Linux 8
-# Features: Error Handling, Idempotency, Logging
+#
+# INCLUDES:
+# 1. AUTOMATIC: VS Code + Python Setup (No Copilot)
+# 2. MENU: RAID Configuration (Lab 04)
+# 3. MENU: Apache Virtual Web Server (Lab 06)
+# 4. MENU: Rsync Daemon Configuration (Lab 05)
 # ==============================================================================
 
 # --- Helper Functions ---
@@ -33,13 +38,75 @@ check_command() {
     fi
 }
 
-# --- Module 1: RAID Configuration ---
+# ==============================================================================
+# MODULE 0: VS CODE & DEV ENVIRONMENT (AUTOMATIC)
+# ==============================================================================
+setup_vscode_env() {
+    echo "----------------------------------------------------------------"
+    log "STARTING AUTOMATIC SETUP: VS Code & Python Environment"
+    echo "----------------------------------------------------------------"
+
+    # 1. Install Python 3 (Required for the Python Extension)
+    log "Ensuring Python 3 is installed..."
+    dnf install -y python3 python3-pip > /dev/null
+    check_command
+
+    # 2. Add VS Code Repository
+    if [ ! -f /etc/yum.repos.d/vscode.repo ]; then
+        log "Adding Microsoft VS Code repository..."
+        rpm --import https://packages.microsoft.com/keys/microsoft.asc
+        sh -c 'echo -e "[code]\nname=Visual Studio Code\nbaseurl=https://packages.microsoft.com/yumrepos/vscode\nenabled=1\ngpgcheck=1\ngpgkey=https://packages.microsoft.com/keys/microsoft.asc" > /etc/yum.repos.d/vscode.repo'
+        check_command
+    else
+        log "VS Code repository already exists."
+    fi
+
+    # 3. Install VS Code
+    log "Installing Visual Studio Code..."
+    dnf check-update > /dev/null 2>&1 || true # Ignore update return codes
+    dnf install -y code > /dev/null
+    check_command
+
+    # 4. Install Extensions (Python Only)
+    # TRICKY PART: We must install extensions for the REAL user, not just root.
+    REAL_USER=$SUDO_USER
+    
+    if [ -z "$REAL_USER" ]; then
+        warn "Script run as pure root (not sudo). Extensions will only be installed for root."
+        TARGET_USER="root"
+    else
+        log "Detected actual user: $REAL_USER. Installing extensions for them..."
+        TARGET_USER="$REAL_USER"
+    fi
+
+    # Define the install command function to run as the target user
+    install_ext() {
+        EXTENSION=$1
+        if [ "$TARGET_USER" == "root" ]; then
+            code --install-extension $EXTENSION --force --no-sandbox --user-data-dir /root/.vscode-root
+        else
+            # Run as the normal user
+            sudo -u $TARGET_USER code --install-extension $EXTENSION --force
+        fi
+    }
+
+    log "Installing Python Extension for $TARGET_USER..."
+    install_ext "ms-python.python"
+
+    echo "----------------------------------------------------------------"
+    log "VS CODE SETUP COMPLETE." 
+    echo "----------------------------------------------------------------"
+    sleep 2
+}
+
+# ==============================================================================
+# MODULE 1: RAID CONFIGURATION (LAB 04)
+# ==============================================================================
 setup_raid() {
     echo "----------------------------------------------------------------"
     log "STARTING MODULE: RAID CONFIGURATION (Lab 04)"
     echo "----------------------------------------------------------------"
 
-    # verify drives exist (basic check)
     if [ ! -e /dev/nvme0n3 ] || [ ! -e /dev/nvme0n4 ]; then
         error_exit "Required drives for RAID 1 (/dev/nvme0n3, /dev/nvme0n4) not found!"
     fi
@@ -53,7 +120,6 @@ setup_raid() {
         warn "RAID 1 (/dev/md0) already exists. Skipping creation."
     else
         log "Creating RAID 1 (/dev/md0)..."
-        # Force creation to avoid interactive prompts, capturing output to hide noise unless error
         yes | mdadm --create /dev/md0 --level=1 --raid-devices=2 /dev/nvme0n3 /dev/nvme0n4 > /dev/null 2>&1
         check_command
         sleep 5
@@ -142,12 +208,9 @@ GDISK
     # --- Persistence ---
     log "Configuring Persistence (fstab)..."
     cp /etc/fstab /etc/fstab.bak
-    
-    # Remove old entries to prevent duplicates
     sed -i '/media\/nfs/d' /etc/fstab
     sed -i '/media\/samba/d' /etc/fstab
 
-    # Validate UUIDs exist before writing
     UUID_R1P1=$(blkid -s UUID -o value /dev/md0p1)
     if [ -z "$UUID_R1P1" ]; then error_exit "Could not find UUID for /dev/md0p1"; fi
 
@@ -160,7 +223,9 @@ GDISK
     log "RAID Configuration Complete."
 }
 
-# --- Module 2: Apache Virtual Web Server ---
+# ==============================================================================
+# MODULE 2: APACHE VIRTUAL WEB SERVER (LAB 06)
+# ==============================================================================
 setup_webserver() {
     echo "----------------------------------------------------------------"
     log "STARTING MODULE: VIRTUAL WEB SERVER (Lab 06)"
@@ -192,7 +257,6 @@ setup_webserver() {
     chcon -R -t httpd_sys_content_t /www
     check_command
 
-    # Idempotent config update
     HTTPD_CONF="/etc/httpd/conf/httpd.conf"
     if ! grep -q "/www/virtualhosts" "$HTTPD_CONF"; then
         log "Updating global httpd.conf..."
@@ -210,7 +274,6 @@ EOF
     fi
 
     log "Generating Virtual Host Configurations..."
-    # Config generation (same as before, just suppressed output)
     cat <<EOF > /etc/httpd/conf.d/${VHOST1}.conf
 <VirtualHost *:80>
     ServerAdmin webmaster@${VHOST1}
@@ -247,7 +310,9 @@ EOF
     log "Web Server Configuration Complete."
 }
 
-# --- Module 3: Rsync Daemon ---
+# ==============================================================================
+# MODULE 3: RSYNC DAEMON (LAB 05 - Activity 7)
+# ==============================================================================
 setup_rsyncd() {
     echo "----------------------------------------------------------------"
     log "STARTING MODULE: RSYNC DAEMON (Lab 05)"
@@ -299,18 +364,25 @@ EOF
     log "Rsync Daemon Configuration Complete."
 }
 
-# --- Main Execution ---
+# ==============================================================================
+# MAIN EXECUTION
+# ==============================================================================
+
 check_root
 
+# 1. RUN VS CODE SETUP AUTOMATICALLY (No options required)
+setup_vscode_env
+
+# 2. RUN MENU FOR OTHER LABS
 while true; do
     echo ""
     echo "==================================================="
-    echo "   ROCKY LINUX ROBUST SETUP MENU"
+    echo "   ROCKY LINUX SERVER CONFIGURATION MENU"
     echo "==================================================="
     echo "1. Run RAID Setup (Lab 04)"
     echo "2. Run Virtual Web Server Setup (Lab 06)"
     echo "3. Run Rsync Daemon Setup (Lab 05)"
-    echo "4. Run ALL Modules"
+    echo "4. Run ALL Server Modules (1, 2 & 3)"
     echo "5. Exit"
     echo "==================================================="
     read -p "Select an option [1-5]: " choice
