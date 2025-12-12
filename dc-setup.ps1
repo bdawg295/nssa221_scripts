@@ -156,8 +156,7 @@ if (-not $IsDC) {
     secedit /configure /db secedit.sdb /cfg $SecEditConfig /areas SECURITYPOLICY | Out-Null
 
     # 2. SET THE PASSWORD
-    $PlainAdminPassword = "student" # You can change this to whatever you want now
-
+    $PlainAdminPassword = "student" 
     try {
         Write-Host "[*] Updating local Administrator password..." -ForegroundColor Cyan
         cmd.exe /c "net user Administrator $PlainAdminPassword"

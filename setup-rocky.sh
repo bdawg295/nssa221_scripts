@@ -316,8 +316,9 @@ setup_rsyncd() {
     log "STARTING MODULE: RSYNC DAEMON (Lab 05)"
     echo "----------------------------------------------------------------"
 
-    log "Installing Rsync..."
+    log "Installing Rsync and daemon..."
     dnf install -y rsync > /dev/null
+    dnf install -y rsync rsync-daemon > /dev/null
     check_command
 
     log "Opening Firewall Port 873..."
