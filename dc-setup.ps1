@@ -719,6 +719,27 @@ if (Prompt-YesNo "Create & link a DESKTOP WALLPAPER GPO for a specific OU?") {
         }
     }
 }
+#--------------------------------------------#
+# 7a) MX Record (MailEnable / Email)
+#--------------------------------------------#
+if (Prompt-YesNo "Configure MX record for email (MailEnable)?") {
+
+    $MailHostName = Read-Host "Enter mail server hostname (e.g. mail)"
+    $MailServerIP = Read-Host "Enter mail server IPv4 address"
+    $MXPriority   = Read-Host "Enter MX priority [default 10]"
+    if (-not $MXPriority) { $MXPriority = 10 }
+
+    $MailFQDN = "$MailHostName.$DomainName"
+
+    if (-not (Get-DnsServerResourceRecord -ZoneName $DomainName -Name $MailHostName -RRType A -ErrorAction SilentlyContinue)) {
+        Add-DnsServerResourceRecordA -ZoneName $DomainName -Name $MailHostName -IPv4Address $MailServerIP
+    }
+
+    if (-not (Get-DnsServerResourceRecord -ZoneName $DomainName -RRType MX -ErrorAction SilentlyContinue |
+              Where-Object { $_.RecordData.MailExchange -eq "$MailFQDN." })) {
+        Add-DnsServerResourceRecordMX -ZoneName $DomainName -MailExchange $MailFQDN -Preference $MXPriority
+    }
+}
 
 #---------------------------------#
 # 7) DNS Record Management (A/CNAME/PTR)
@@ -735,7 +756,8 @@ if (Prompt-YesNo "Create DNS A, CNAME, and/or PTR records for domain-joined comp
         Write-Host $_.Exception.Message -ForegroundColor Red
         Write-Host "TROUBLESHOOT: DNS role must be installed on this server to manage zones/records." -ForegroundColor Yellow
         return
-    }
+    } 
+    
 
     # Ask how many records to create
     $RecordCount = [int](Read-Host "How many computer DNS records would you like to create?")
@@ -867,242 +889,6 @@ if (Prompt-YesNo "Create DNS A, CNAME, and/or PTR records for domain-joined comp
     Write-Host ""
     Write-Host "[+] DNS record management complete." -ForegroundColor Green
 }
-
-#---------------------------------#
-# 8) Mail Server Setup (MailEnable)
-#---------------------------------#
-if (Prompt-YesNo "Install & Configure MailEnable (Email Server)?") {
-
-    # --- Variables ---
-    $DomainName    = "bmw7216.com"
-    $ServerIP      = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -notlike "*Loopback*" }).IPAddress[0]
-    $IISRoot       = "C:\inetpub\wwwroot"
-    $AutoConfigDir = "$IISRoot\mail"
-    $MEName        = "MailEnable-Standard"
-    $MEDownloadUrl = "https://www.mailenable.com/standard/MailEnable-Standard.exe"
-    $MEInstaller   = "$env:TEMP\$MEName.exe"
-    $MEInstallDir  = "C:\Program Files (x86)\Mail Enable"
-    $MEBin         = "$MEInstallDir\Bin"
-
-    Write-Host "============================================================" -ForegroundColor Cyan
-    Write-Host "   MAIL SERVER AUTOMATION: DNS, IIS, & MailEnable Setup" -ForegroundColor Cyan
-    Write-Host "============================================================" -ForegroundColor Cyan
-
-    # ------------------------------------------------------------------
-    # STEP 1: DNS RECORDS
-    # ------------------------------------------------------------------
-    Write-Host "`n[1] Configuring DNS Records..." -ForegroundColor Cyan
-    try {
-        Add-DnsServerResourceRecordMX -Name "." -ZoneName $DomainName -MailExchange "mail.$DomainName" -Preference 10 -ErrorAction Stop
-        Write-Host "    [+] MX Record created." -ForegroundColor Green
-    } catch { Write-Host "    [!] MX Record exists." -ForegroundColor Yellow }
-
-    try {
-        Add-DnsServerResourceRecordA -Name "mail" -ZoneName $DomainName -IPv4Address $ServerIP -ErrorAction Stop
-        Write-Host "    [+] 'mail' A Record created." -ForegroundColor Green
-    } catch { Write-Host "    [!] 'mail' A Record exists." -ForegroundColor Yellow }
-
-    try {
-        Add-DnsServerResourceRecordA -Name "autoconfig" -ZoneName $DomainName -IPv4Address $ServerIP -ErrorAction Stop
-        Write-Host "    [+] 'autoconfig' A Record created." -ForegroundColor Green
-    } catch { Write-Host "    [!] 'autoconfig' A Record exists." -ForegroundColor Yellow }
-
-    # ------------------------------------------------------------------
-    # STEP 2: INSTALL MAILENABLE STANDARD (ROBUST)
-    # ------------------------------------------------------------------
-    Write-Host "`n[2] Installing MailEnable Standard..." -ForegroundColor Cyan
-
-    if (-not (Test-Path "$MEBin\MEAdmin.exe")) {
-        
-        # 2a. Download with curl.exe (Bypasses IE Security)
-        Write-Host "    [*] Downloading MailEnable installer via curl.exe..."
-        
-        # Clean up previous failed attempts
-        if (Test-Path $MEInstaller) { Remove-Item $MEInstaller -Force }
-
-        # We use '& curl.exe' to force PowerShell to use the actual .exe, not its own alias.
-        # -L follows redirects
-        # -o saves to file
-        # -A spoofs a browser User-Agent to avoid 403 blocks
-        & curl.exe -L -o "$MEInstaller" "$MEDownloadUrl" -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-
-        # 2b. Validate Download
-        if ((Test-Path $MEInstaller) -and (Get-Item $MEInstaller).Length -gt 50000000) {
-            Write-Host "    [+] Download successful ($([math]::Round((Get-Item $MEInstaller).Length / 1MB, 2)) MB)." -ForegroundColor Green
-        }
-        else {
-            Write-Host "    [!] curl failed. Attempting 'Nuclear Option' (Disabling IE Security)..." -ForegroundColor Yellow
-
-            # --- NUCLEAR OPTION: Temporarily Disable IE ESC in Registry ---
-            $AdminKey = "HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\{A509B1A7-37EF-4b3f-8CFC-4F3A74704073}"
-            $UserKey  = "HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\{A509B1A8-37EF-4b3f-8CFC-4F3A74704073}"
-            
-            # Save current state so we can restore it (Good practice)
-            $AdminState = (Get-ItemProperty -Path $AdminKey -Name "IsInstalled" -ErrorAction SilentlyContinue).IsInstalled
-            $UserState  = (Get-ItemProperty -Path $UserKey -Name "IsInstalled" -ErrorAction SilentlyContinue).IsInstalled
-
-            # Turn it OFF (0)
-            Set-ItemProperty -Path $AdminKey -Name "IsInstalled" -Value 0 -ErrorAction SilentlyContinue
-            Set-ItemProperty -Path $UserKey  -Name "IsInstalled" -Value 0 -ErrorAction SilentlyContinue
-            
-            try {
-                # Try standard download again now that shields are down
-                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                Invoke-WebRequest -Uri $MEDownloadUrl -OutFile $MEInstaller -UseBasicParsing
-            }
-            finally {
-                # Turn it back ON (Restore state)
-                if ($AdminState -ne $null) { Set-ItemProperty -Path $AdminKey -Name "IsInstalled" -Value $AdminState }
-                if ($UserState -ne $null)  { Set-ItemProperty -Path $UserKey  -Name "IsInstalled" -Value $UserState }
-            }
-
-            # Final Check
-            if ((Get-Item $MEInstaller).Length -lt 50000000) {
-                Write-Host "    [ERROR] Download STILL failed. You must download it manually." -ForegroundColor Red
-                return
-            }
-        }
-
-        # 2b. Install Silently
-        Write-Host "    [*] Running Silent Installer (This takes 1-2 minutes)..."
-        $Process = Start-Process -FilePath $MEInstaller -ArgumentList "/S" -PassThru
-        $Process.WaitForExit()
-        
-        Write-Host "    [+] Installer finished." -ForegroundColor Green
-        
-        # 2c. Wait for Service Registration
-        Write-Host "    [*] Waiting for system registration..."
-        Start-Sleep -Seconds 20
-
-        # 2d. Force Register COM Libraries (The most common failure point)
-        if (Test-Path "$MEBin\MEInstaller.exe") {
-             Write-Host "    [*] Registering MailEnable Components..."
-             # Command '1' registers components in MEInstaller.exe
-             Start-Process -FilePath "$MEBin\MEInstaller.exe" -ArgumentList "1" -Wait -WindowStyle Hidden
-        }
-    } else {
-        Write-Host "    [!] MailEnable is already installed. Skipping install." -ForegroundColor Yellow
-    }
-
-    # ------------------------------------------------------------------
-    # STEP 3: CONFIGURE POSTOFFICE & USER (via COM API)
-    # ------------------------------------------------------------------
-    Write-Host "`n[3] Creating Postoffice and Users..." -ForegroundColor Cyan
-
-    # Define Functions
-    function New-MEPostOffice {
-        param($POName, $Password)
-        try {
-            $oPO = New-Object -ComObject MEAOPO.Postoffice
-            $oPO.Name = $POName
-            $oPO.Status = 1
-            $oPO.Account = $POName
-            if ($oPO.AddPostoffice() -eq 1) { 
-                Write-Host "    [+] Postoffice '$POName' created." -ForegroundColor Green 
-            } else { 
-                Write-Host "    [!] Postoffice '$POName' likely exists." -ForegroundColor Yellow 
-            }
-
-            $oDom = New-Object -ComObject MEAOPO.Domain
-            $oDom.AccountName = $POName
-            $oDom.DomainName = $POName
-            $oDom.Status = 1
-            $oDom.AddDomain() | Out-Null
-        } catch {
-            Write-Host "    [ERROR] COM Object Failure. MailEnable libraries not registered." -ForegroundColor Red
-            throw
-        }
-    }
-
-    function New-MEMailbox {
-        param($POName, $MailboxName, $Password)
-        $oMbox = New-Object -ComObject MEAOPO.Mailbox
-        $oMbox.Postoffice = $POName
-        $oMbox.Mailbox = $MailboxName
-        $oMbox.Limit = -1
-        $oMbox.Status = 1
-        $oMbox.AddMailbox() | Out-Null
-
-        $oLogin = New-Object -ComObject MEAOPO.Login
-        $oLogin.Account = $POName
-        $oLogin.Password = $Password
-        $oLogin.Rights = "USER"
-        $oLogin.Status = 1
-        $oLogin.UserName = "$MailboxName@$POName"
-        $oLogin.AddLogin() | Out-Null
-
-        $oMap = New-Object -ComObject MEAOPO.AddressMap
-        $oMap.Account = $POName
-        $oMap.DestinationAddress = "[SF:$POName/$MailboxName]"
-        $oMap.SourceAddress = "[SMTP:$MailboxName@$POName]"
-        $oMap.AddAddressMap() | Out-Null
-        
-        Write-Host "    [+] User '$MailboxName@$POName' created." -ForegroundColor Green
-    }
-
-    # Execute
-    try {
-        New-MEPostOffice -POName $DomainName -Password "P@ssword123"
-        New-MEMailbox -POName $DomainName -MailboxName "student" -Password "student"
-    }
-    catch {
-        Write-Host "    [ERROR] Configuration failed. Steps to fix:" -ForegroundColor Red
-        Write-Host "    1. Open 'MailEnable Installer' from Start Menu." -ForegroundColor Yellow
-        Write-Host "    2. Select 'Common Installation' -> 'Register Components' -> Execute." -ForegroundColor Yellow
-        Write-Host "    3. Re-run this script." -ForegroundColor Yellow
-    }
-
-    # ------------------------------------------------------------------
-    # STEP 4: IIS AUTOCONFIG
-    # ------------------------------------------------------------------
-    Write-Host "`n[4] Configuring IIS Autoconfig Service..." -ForegroundColor Cyan
-
-    if (-not (Get-WindowsFeature Web-Server).Installed) {
-        Install-WindowsFeature Web-Server -IncludeManagementTools | Out-Null
-    }
-
-    New-Item -Path $AutoConfigDir -ItemType Directory -Force | Out-Null
-
-    $XmlContent = @"
-<?xml version="1.0" encoding="UTF-8"?>
-<clientConfig version="1.1">
-  <emailProvider id="$DomainName">
-    <domain>$DomainName</domain>
-    <displayName>Juche Mail</displayName>
-    <displayShortName>Juche</displayShortName>
-    <incomingServer type="imap">
-      <hostname>mail.$DomainName</hostname>
-      <port>143</port>
-      <socketType>plain</socketType>
-      <authentication>password-cleartext</authentication>
-      <username>%EMAILADDRESS%</username>
-    </incomingServer>
-    <outgoingServer type="smtp">
-      <hostname>mail.$DomainName</hostname>
-      <port>25</port>
-      <socketType>plain</socketType>
-      <authentication>password-cleartext</authentication>
-      <username>%EMAILADDRESS%</username>
-    </outgoingServer>
-  </emailProvider>
-</clientConfig>
-"@
-
-    $XmlPath = "$AutoConfigDir\config-v1.1.xml"
-    Set-Content -Path $XmlPath -Value $XmlContent
-    Write-Host "    [+] XML config written to $XmlPath" -ForegroundColor Green
-
-    # Restart IIS to apply changes
-    IISReset /noforce | Out-Null
-    Write-Host "    [+] IIS Restarted." -ForegroundColor Green
-
-    Write-Host "`n[SUCCESS] Mail Server Setup Complete." -ForegroundColor Green
-    Write-Host "           Postoffice: $DomainName" -ForegroundColor Gray
-    Write-Host "           User:       student@$DomainName" -ForegroundColor Gray
-    Write-Host "           Password:   student" -ForegroundColor Gray
-    Write-Host ""
-}
-
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
