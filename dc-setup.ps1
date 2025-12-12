@@ -914,36 +914,53 @@ if (Prompt-YesNo "Install & Configure MailEnable (Email Server)?") {
 
     if (-not (Test-Path "$MEBin\MEAdmin.exe")) {
         
-        # 2a. Download with Robust BITS Transfer
-        Write-Host "    [*] Downloading MailEnable installer (using BITS)..."
+        # 2a. Download with curl.exe (Bypasses IE Security)
+        Write-Host "    [*] Downloading MailEnable installer via curl.exe..."
         
-        # Cleanup partials
+        # Clean up previous failed attempts
         if (Test-Path $MEInstaller) { Remove-Item $MEInstaller -Force }
 
-        try {
-            Import-Module BitsTransfer -ErrorAction SilentlyContinue
-            # Start-BitsTransfer is much more reliable on Windows Server than Invoke-WebRequest
-            Start-BitsTransfer -Source $MEDownloadUrl -Destination $MEInstaller -ErrorAction Stop
+        # We use '& curl.exe' to force PowerShell to use the actual .exe, not its own alias.
+        # -L follows redirects
+        # -o saves to file
+        # -A spoofs a browser User-Agent to avoid 403 blocks
+        & curl.exe -L -o "$MEInstaller" "$MEDownloadUrl" -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+
+        # 2b. Validate Download
+        if ((Test-Path $MEInstaller) -and (Get-Item $MEInstaller).Length -gt 50000000) {
+            Write-Host "    [+] Download successful ($([math]::Round((Get-Item $MEInstaller).Length / 1MB, 2)) MB)." -ForegroundColor Green
         }
-        catch {
-            Write-Host "    [!] BITS failed. Trying fallback web request..." -ForegroundColor Yellow
+        else {
+            Write-Host "    [!] curl failed. Attempting 'Nuclear Option' (Disabling IE Security)..." -ForegroundColor Yellow
+
+            # --- NUCLEAR OPTION: Temporarily Disable IE ESC in Registry ---
+            $AdminKey = "HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\{A509B1A7-37EF-4b3f-8CFC-4F3A74704073}"
+            $UserKey  = "HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\{A509B1A8-37EF-4b3f-8CFC-4F3A74704073}"
+            
+            # Save current state so we can restore it (Good practice)
+            $AdminState = (Get-ItemProperty -Path $AdminKey -Name "IsInstalled" -ErrorAction SilentlyContinue).IsInstalled
+            $UserState  = (Get-ItemProperty -Path $UserKey -Name "IsInstalled" -ErrorAction SilentlyContinue).IsInstalled
+
+            # Turn it OFF (0)
+            Set-ItemProperty -Path $AdminKey -Name "IsInstalled" -Value 0 -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $UserKey  -Name "IsInstalled" -Value 0 -ErrorAction SilentlyContinue
+            
             try {
-                # Fallback: Spoof User-Agent to look like a real browser (fixes 403 Forbidden)
+                # Try standard download again now that shields are down
                 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                Invoke-WebRequest -Uri $MEDownloadUrl -OutFile $MEInstaller -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -UseBasicParsing
+                Invoke-WebRequest -Uri $MEDownloadUrl -OutFile $MEInstaller -UseBasicParsing
             }
-            catch {
-                Write-Host "    [ERROR] All download methods failed." -ForegroundColor Red
-                Write-Host "    TROUBLESHOOT: Manually download MailEnable Standard and save it to: $MEInstaller" -ForegroundColor Yellow
+            finally {
+                # Turn it back ON (Restore state)
+                if ($AdminState -ne $null) { Set-ItemProperty -Path $AdminKey -Name "IsInstalled" -Value $AdminState }
+                if ($UserState -ne $null)  { Set-ItemProperty -Path $UserKey  -Name "IsInstalled" -Value $UserState }
+            }
+
+            # Final Check
+            if ((Get-Item $MEInstaller).Length -lt 50000000) {
+                Write-Host "    [ERROR] Download STILL failed. You must download it manually." -ForegroundColor Red
                 return
             }
-        }
-
-        # Check if file is valid (larger than 50MB)
-        if ((Get-Item $MEInstaller).Length -lt 50000000) {
-            Write-Host "    [ERROR] File is too small. The server likely blocked the download." -ForegroundColor Red
-            Write-Host "    TROUBLESHOOT: Open IE/Edge, download MailEnable Standard manually, and save to $MEInstaller" -ForegroundColor Yellow
-            return
         }
 
         # 2b. Install Silently
