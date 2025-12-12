@@ -914,21 +914,35 @@ if (Prompt-YesNo "Install & Configure MailEnable (Email Server)?") {
 
     if (-not (Test-Path "$MEBin\MEAdmin.exe")) {
         
-        # 2a. Download with Size Check
-        Write-Host "    [*] Downloading MailEnable installer..."
+        # 2a. Download with Robust BITS Transfer
+        Write-Host "    [*] Downloading MailEnable installer (using BITS)..."
+        
+        # Cleanup partials
+        if (Test-Path $MEInstaller) { Remove-Item $MEInstaller -Force }
+
         try {
-            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            Invoke-WebRequest -Uri $MEDownloadUrl -OutFile $MEInstaller -UseBasicParsing
-        } catch {
-            Write-Host "    [ERROR] Download failed. Try downloading manually." -ForegroundColor Red
-            return
+            Import-Module BitsTransfer -ErrorAction SilentlyContinue
+            # Start-BitsTransfer is much more reliable on Windows Server than Invoke-WebRequest
+            Start-BitsTransfer -Source $MEDownloadUrl -Destination $MEInstaller -ErrorAction Stop
+        }
+        catch {
+            Write-Host "    [!] BITS failed. Trying fallback web request..." -ForegroundColor Yellow
+            try {
+                # Fallback: Spoof User-Agent to look like a real browser (fixes 403 Forbidden)
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                Invoke-WebRequest -Uri $MEDownloadUrl -OutFile $MEInstaller -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -UseBasicParsing
+            }
+            catch {
+                Write-Host "    [ERROR] All download methods failed." -ForegroundColor Red
+                Write-Host "    TROUBLESHOOT: Manually download MailEnable Standard and save it to: $MEInstaller" -ForegroundColor Yellow
+                return
+            }
         }
 
         # Check if file is valid (larger than 50MB)
-        $FileItem = Get-Item $MEInstaller
-        if ($FileItem.Length -lt 50000000) {
-            Write-Host "    [ERROR] Downloaded file is too small ($($FileItem.Length / 1MB) MB). It might be corrupt." -ForegroundColor Red
-            Write-Host "    TROUBLESHOOT: Download MailEnable-Standard.exe manually to $env:TEMP" -ForegroundColor Yellow
+        if ((Get-Item $MEInstaller).Length -lt 50000000) {
+            Write-Host "    [ERROR] File is too small. The server likely blocked the download." -ForegroundColor Red
+            Write-Host "    TROUBLESHOOT: Open IE/Edge, download MailEnable Standard manually, and save to $MEInstaller" -ForegroundColor Yellow
             return
         }
 
