@@ -147,26 +147,31 @@ if (-not $IsDC) {
     Write-Host ""
     Write-Host "=== Setting local Administrator password (exam preset) ===" -ForegroundColor Cyan
 
-    $PlainAdminPassword = "RitNssa221!"
+    # 1. DISABLE PASSWORD COMPLEXITY REQUIREMENTS (Prevents the error)
+    Write-Host "[*] Disabling Password Complexity Requirements..." -ForegroundColor Cyan
+    $SecEditConfig = "$env:TEMP\secpol.cfg"
+    secedit /export /cfg $SecEditConfig | Out-Null
+    (Get-Content $SecEditConfig) -replace "PasswordComplexity = 1", "PasswordComplexity = 0" | Set-Content $SecEditConfig
+    (Get-Content $SecEditConfig) -replace "MinimumPasswordLength = .*", "MinimumPasswordLength = 0" | Set-Content $SecEditConfig
+    secedit /configure /db secedit.sdb /cfg $SecEditConfig /areas SECURITYPOLICY | Out-Null
+
+    # 2. SET THE PASSWORD
+    $PlainAdminPassword = "student" # You can change this to whatever you want now
 
     try {
         Write-Host "[*] Updating local Administrator password..." -ForegroundColor Cyan
         cmd.exe /c "net user Administrator $PlainAdminPassword"
         Write-Host "[+] Local Administrator password set successfully." -ForegroundColor Green
-        Write-Host "Rebooting to satisfy AD DS prerequisites..." -ForegroundColor Yellow
-        Restart-Computer -Force
     }
     catch {
         Write-Host "ERROR: Failed to set local Administrator password." -ForegroundColor Red
         Write-Host $_.Exception.Message -ForegroundColor Red
-        Write-Host "TROUBLESHOOT: Run PowerShell as Administrator." -ForegroundColor Yellow
         return
     }
 
     Write-Host "[!] Administrator password is now: $PlainAdminPassword" -ForegroundColor Yellow
     Write-Host ""
 }
-
 
 #-----------------------------------------#
 # 2) Promote server to a new forest (opt) #
