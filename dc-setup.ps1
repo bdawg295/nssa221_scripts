@@ -153,6 +153,8 @@ if (-not $IsDC) {
         Write-Host "[*] Updating local Administrator password..." -ForegroundColor Cyan
         cmd.exe /c "net user Administrator $PlainAdminPassword"
         Write-Host "[+] Local Administrator password set successfully." -ForegroundColor Green
+        Write-Host "Rebooting to satisfy AD DS prerequisites..." -ForegroundColor Yellow
+        Restart-Computer -Force
     }
     catch {
         Write-Host "ERROR: Failed to set local Administrator password." -ForegroundColor Red
