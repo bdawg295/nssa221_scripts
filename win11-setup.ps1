@@ -110,10 +110,45 @@ catch {
     exit 1
 }
 
+# ==========================================
+# CLIENT MAIL SETUP
+# ==========================================
+
+# 1. Check DNS Settings (Critical)
+# The client MUST use the DC as its DNS server to find 'autoconfig'
+$DnsServer = "192.168.1.2" # CHANGE THIS TO YOUR DC IP IF DIFFERENT
+$Interface = Get-NetAdapter | Where-Object { $_.Status -eq "Up" } | Select-Object -First 1
+
+Write-Host "=== Setting DNS to DC ($DnsServer) ===" -ForegroundColor Cyan
+Set-DnsClientServerAddress -InterfaceIndex $Interface.ifIndex -ServerAddresses $DnsServer
+Write-Host "[+] DNS configured." -ForegroundColor Green
+
+# 2. Install Thunderbird Silently
+Write-Host "=== Installing Mozilla Thunderbird ===" -ForegroundColor Cyan
+
+# URL for standard US English installer
+$ThunderbirdUrl = "https://download.mozilla.org/?product=thunderbird-latest&os=win64&lang=en-US"
+$InstallerPath  = "$env:TEMP\ThunderbirdSetup.exe"
+
+try {
+    Write-Host "[*] Downloading Thunderbird..."
+    Invoke-WebRequest -Uri $ThunderbirdUrl -OutFile $InstallerPath
+    
+    Write-Host "[*] Installing..."
+    # /S is the silent switch for Thunderbird
+    Start-Process -FilePath $InstallerPath -ArgumentList "/S" -Wait -NoNewWindow
+    
+    Write-Host "[+] Thunderbird Installed Successfully!" -ForegroundColor Green
+    Write-Host "    Open Thunderbird, enter 'user@$((Get-WmiObject Win32_ComputerSystem).Domain)', and password." -ForegroundColor Yellow
+}
+catch {
+    Write-Host "[!] Error installing Thunderbird: $($_.Exception.Message)" -ForegroundColor Red
+}
+
 # -----------------------------
 # REBOOT
 # -----------------------------
 Write-Host ""
 Write-Host "[!] Rebooting in 10 seconds to complete domain join..." -ForegroundColor Yellow
-Start-Sleep 10
+Start-Sleep 20
 Restart-Computer -Force

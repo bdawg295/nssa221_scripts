@@ -121,6 +121,44 @@ else {
     Write-Host ""
 }
 
+#-----------------------------------------#
+# Ensure correct computer hostname
+#-----------------------------------------#
+if (-not $IsDC) {
+
+    Write-Host ""
+    Write-Host "=== Hostname Configuration ===" -ForegroundColor Cyan
+
+    $CurrentName = (Get-ComputerInfo).CsName
+
+    $DesiredShortName = Read-Host "Enter desired COMPUTER NAME (short name, e.g. DC1)"
+    if ([string]::IsNullOrWhiteSpace($DesiredShortName)) {
+        Write-Host "ERROR: Computer name cannot be blank." -ForegroundColor Red
+        return
+    }
+
+    if ($CurrentName -ieq $DesiredShortName) {
+        Write-Host "[+] Computer name already set to '$CurrentName'. Skipping rename." -ForegroundColor Green
+    }
+    else {
+        Write-Host "[*] Renaming computer from '$CurrentName' to '$DesiredShortName'..." -ForegroundColor Cyan
+
+        try {
+            Rename-Computer -NewName $DesiredShortName -Force -ErrorAction Stop
+            Write-Host "[+] Computer renamed successfully." -ForegroundColor Green
+            Write-Host "[!] A reboot is REQUIRED before continuing." -ForegroundColor Yellow
+            Write-Host "    Re-run this script after reboot." -ForegroundColor Yellow
+            Restart-Computer -Force
+            return
+        }
+        catch {
+            Write-Host "ERROR: Failed to rename computer." -ForegroundColor Red
+            Write-Host $_.Exception.Message -ForegroundColor Red
+            return
+        }
+    }
+}
+
 #----------------------------#
 # 1) Install Roles (optional)
 #----------------------------#
@@ -829,6 +867,209 @@ if (Prompt-YesNo "Create DNS A, CNAME, and/or PTR records for domain-joined comp
     Write-Host ""
     Write-Host "[+] DNS record management complete." -ForegroundColor Green
 }
+
+#---------------------------------#
+# 8) Mail Server Setup (MailEnable)
+#---------------------------------#
+if (Prompt-YesNo "Install & Configure MailEnable (Email Server)?") {
+
+    # --- Variables ---
+    $DomainName    = "bmw7216.com"
+    $ServerIP      = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -notlike "*Loopback*" }).IPAddress[0]
+    $IISRoot       = "C:\inetpub\wwwroot"
+    $AutoConfigDir = "$IISRoot\mail"
+    $MEName        = "MailEnable-Standard"
+    $MEDownloadUrl = "https://www.mailenable.com/standard/MailEnable-Standard.exe"
+    $MEInstaller   = "$env:TEMP\$MEName.exe"
+    $MEInstallDir  = "C:\Program Files (x86)\Mail Enable"
+
+    Write-Host "============================================================" -ForegroundColor Cyan
+    Write-Host "   MAIL SERVER AUTOMATION: DNS, IIS, & MailEnable Setup" -ForegroundColor Cyan
+    Write-Host "============================================================" -ForegroundColor Cyan
+
+    # ------------------------------------------------------------------
+    # STEP 1: DNS RECORDS (MX, Mail A-Record, Autoconfig)
+    # ------------------------------------------------------------------
+    Write-Host "`n[1] Configuring DNS Records..." -ForegroundColor Cyan
+
+    # 1. MX Record
+    try {
+        Add-DnsServerResourceRecordMX -Name "." -ZoneName $DomainName -MailExchange "mail.$DomainName" -Preference 10 -ErrorAction Stop
+        Write-Host "    [+] MX Record created." -ForegroundColor Green
+    } catch { Write-Host "    [!] MX Record exists." -ForegroundColor Yellow }
+
+    # 2. 'mail' A Record
+    try {
+        Add-DnsServerResourceRecordA -Name "mail" -ZoneName $DomainName -IPv4Address $ServerIP -ErrorAction Stop
+        Write-Host "    [+] 'mail' A Record created." -ForegroundColor Green
+    } catch { Write-Host "    [!] 'mail' A Record exists." -ForegroundColor Yellow }
+
+    # 3. 'autoconfig' A Record
+    try {
+        Add-DnsServerResourceRecordA -Name "autoconfig" -ZoneName $DomainName -IPv4Address $ServerIP -ErrorAction Stop
+        Write-Host "    [+] 'autoconfig' A Record created." -ForegroundColor Green
+    } catch { Write-Host "    [!] 'autoconfig' A Record exists." -ForegroundColor Yellow }
+
+
+    # ------------------------------------------------------------------
+    # STEP 2: INSTALL MAILENABLE STANDARD
+    # ------------------------------------------------------------------
+    Write-Host "`n[2] Installing MailEnable Standard..." -ForegroundColor Cyan
+
+    if (-not (Test-Path "$MEInstallDir\Bin\MEAdmin.exe")) {
+        # Download
+        Write-Host "    [*] Downloading MailEnable installer (this may take a moment)..."
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -Uri $MEDownloadUrl -OutFile $MEInstaller
+        } catch {
+            Write-Host "    [ERROR] Download failed. Please download MailEnable Standard manually to $MEInstaller" -ForegroundColor Red
+            return
+        }
+
+        # Install Silently
+        # /S = Silent, /SysDir = Destination
+        Write-Host "    [*] Running Silent Installer..."
+        Start-Process -FilePath $MEInstaller -ArgumentList "/S" -Wait -NoNewWindow
+        
+        Write-Host "    [+] Installation Complete." -ForegroundColor Green
+        
+        # Wait for services to register
+        Start-Sleep -Seconds 10
+    } else {
+        Write-Host "    [!] MailEnable is already installed. Skipping install." -ForegroundColor Yellow
+    }
+
+
+    # ------------------------------------------------------------------
+    # STEP 3: CONFIGURE POSTOFFICE & USER (via COM API)
+    # ------------------------------------------------------------------
+    Write-Host "`n[3] Creating Postoffice and Users..." -ForegroundColor Cyan
+
+    # Helper function to create ME Objects
+    function New-MEPostOffice {
+        param($POName, $Password)
+        
+        # Create Postoffice
+        $oPO = New-Object -ComObject MEAOPO.Postoffice
+        $oPO.Name = $POName
+        $oPO.Status = 1
+        $oPO.Account = $POName
+        if ($oPO.AddPostoffice() -eq 1) { 
+            Write-Host "    [+] Postoffice '$POName' created." -ForegroundColor Green 
+        } else { 
+            Write-Host "    [!] Postoffice '$POName' likely exists." -ForegroundColor Yellow 
+        }
+
+        # Add Domain to Postoffice (maps bmw7216.com -> Postoffice)
+        $oDom = New-Object -ComObject MEAOPO.Domain
+        $oDom.AccountName = $POName
+        $oDom.DomainName = $POName
+        $oDom.Status = 1
+        $oDom.AddDomain() | Out-Null
+    }
+
+    function New-MEMailbox {
+        param($POName, $MailboxName, $Password)
+
+        # 1. Create Mailbox (The storage bucket)
+        $oMbox = New-Object -ComObject MEAOPO.Mailbox
+        $oMbox.Postoffice = $POName
+        $oMbox.Mailbox = $MailboxName
+        $oMbox.Limit = -1
+        $oMbox.RedirectAddress = ""
+        $oMbox.RedirectStatus = 0
+        $oMbox.Status = 1
+        $oMbox.AddMailbox() | Out-Null
+
+        # 2. Create Login (The authentication user/pass)
+        $oLogin = New-Object -ComObject MEAOPO.Login
+        $oLogin.Account = $POName
+        $oLogin.Description = "Student User"
+        $oLogin.Password = $Password
+        $oLogin.Rights = "USER"
+        $oLogin.Status = 1
+        $oLogin.UserName = "$MailboxName@$POName"
+        $oLogin.AddLogin() | Out-Null
+
+        # 3. Create Address Map (Links email address to mailbox)
+        $oMap = New-Object -ComObject MEAOPO.AddressMap
+        $oMap.Account = $POName
+        $oMap.DestinationAddress = "[SF:$POName/$MailboxName]"
+        $oMap.SourceAddress = "[SMTP:$MailboxName@$POName]"
+        $oMap.AddAddressMap() | Out-Null
+        
+        Write-Host "    [+] User '$MailboxName@$POName' created with password '$Password'." -ForegroundColor Green
+    }
+
+    # --- Execute Configuration ---
+    try {
+        # Create PO: bmw7216.com
+        New-MEPostOffice -POName $DomainName -Password "P@ssword123" # PO Admin password
+        
+        # Create User: student / student
+        New-MEMailbox -POName $DomainName -MailboxName "student" -Password "student"
+    }
+    catch {
+        Write-Host "    [ERROR] Failed to configure MailEnable objects. Is the installation finished?" -ForegroundColor Red
+        Write-Host "    Details: $($_.Exception.Message)" -ForegroundColor Red
+    }
+
+
+    # ------------------------------------------------------------------
+    # STEP 4: IIS AUTOCONFIG (For Thunderbird)
+    # ------------------------------------------------------------------
+    Write-Host "`n[4] Configuring IIS Autoconfig Service..." -ForegroundColor Cyan
+
+    # Install IIS if missing
+    if (-not (Get-WindowsFeature Web-Server).Installed) {
+        Install-WindowsFeature Web-Server -IncludeManagementTools | Out-Null
+    }
+
+    # Create Directory
+    New-Item -Path $AutoConfigDir -ItemType Directory -Force | Out-Null
+
+    # Create XML
+    $XmlContent = @"
+<?xml version="1.0" encoding="UTF-8"?>
+<clientConfig version="1.1">
+  <emailProvider id="$DomainName">
+    <domain>$DomainName</domain>
+    <displayName>Juche Mail</displayName>
+    <displayShortName>Juche</displayShortName>
+    <incomingServer type="imap">
+      <hostname>mail.$DomainName</hostname>
+      <port>143</port>
+      <socketType>plain</socketType>
+      <authentication>password-cleartext</authentication>
+      <username>%EMAILADDRESS%</username>
+    </incomingServer>
+    <outgoingServer type="smtp">
+      <hostname>mail.$DomainName</hostname>
+      <port>25</port>
+      <socketType>plain</socketType>
+      <authentication>password-cleartext</authentication>
+      <username>%EMAILADDRESS%</username>
+    </outgoingServer>
+  </emailProvider>
+</clientConfig>
+"@
+
+    $XmlPath = "$AutoConfigDir\config-v1.1.xml"
+    Set-Content -Path $XmlPath -Value $XmlContent
+    Write-Host "    [+] XML config written to $XmlPath" -ForegroundColor Green
+
+    # Restart IIS to apply changes
+    IISReset /noforce | Out-Null
+    Write-Host "    [+] IIS Restarted." -ForegroundColor Green
+
+    Write-Host "`n[SUCCESS] Mail Server Setup Complete." -ForegroundColor Green
+    Write-Host "           Postoffice: $DomainName" -ForegroundColor Gray
+    Write-Host "           User:       student@$DomainName" -ForegroundColor Gray
+    Write-Host "           Password:   student" -ForegroundColor Gray
+    Write-Host ""
+}
+
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
