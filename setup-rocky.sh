@@ -414,12 +414,12 @@ setup_samba() {
     echo ""
     echo "--- Samba User Setup ---"
     echo "Lab 5 suggests creating users like: joey, johnny, deedee"
-    read -p "How many Samba users do you want to create? " USER_COUNT
+    read -p "How many Samba users do you want to create? " USER_COUNT < /dev/tty
 
     if [[ "$USER_COUNT" =~ ^[0-9]+$ ]]; then
         for ((i=1; i<=USER_COUNT; i++)); do
             echo ""
-            read -p "Enter username #$i: " SMB_USER
+            read -p "Enter username #$i: " SMB_USER < /dev/tty
             
             # Create system user (nologin) 
             if id "$SMB_USER" &>/dev/null; then
@@ -492,7 +492,9 @@ while true; do
     echo "5. Run ALL Server Modules (1-4)"
     echo "6. Exit"
     echo "==================================================="
-    read -p "Select an option [1-6]: " choice
+    
+    # FIX 1: Force read from TTY to prevent infinite loop on EOF
+    read -p "Select an option [1-6]: " choice < /dev/tty
 
     case $choice in
         1) setup_raid ;;
@@ -515,5 +517,6 @@ while true; do
     esac
     
     echo ""
-    read -p "Press Enter to continue..."
+    # FIX 2: Force read from TTY here as well
+    read -p "Press Enter to continue..." < /dev/tty
 done
