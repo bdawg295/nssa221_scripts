@@ -882,154 +882,156 @@ if (Prompt-YesNo "Install & Configure MailEnable (Email Server)?") {
     $MEDownloadUrl = "https://www.mailenable.com/standard/MailEnable-Standard.exe"
     $MEInstaller   = "$env:TEMP\$MEName.exe"
     $MEInstallDir  = "C:\Program Files (x86)\Mail Enable"
+    $MEBin         = "$MEInstallDir\Bin"
 
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host "   MAIL SERVER AUTOMATION: DNS, IIS, & MailEnable Setup" -ForegroundColor Cyan
     Write-Host "============================================================" -ForegroundColor Cyan
 
     # ------------------------------------------------------------------
-    # STEP 1: DNS RECORDS (MX, Mail A-Record, Autoconfig)
+    # STEP 1: DNS RECORDS
     # ------------------------------------------------------------------
     Write-Host "`n[1] Configuring DNS Records..." -ForegroundColor Cyan
-
-    # 1. MX Record
     try {
         Add-DnsServerResourceRecordMX -Name "." -ZoneName $DomainName -MailExchange "mail.$DomainName" -Preference 10 -ErrorAction Stop
         Write-Host "    [+] MX Record created." -ForegroundColor Green
     } catch { Write-Host "    [!] MX Record exists." -ForegroundColor Yellow }
 
-    # 2. 'mail' A Record
     try {
         Add-DnsServerResourceRecordA -Name "mail" -ZoneName $DomainName -IPv4Address $ServerIP -ErrorAction Stop
         Write-Host "    [+] 'mail' A Record created." -ForegroundColor Green
     } catch { Write-Host "    [!] 'mail' A Record exists." -ForegroundColor Yellow }
 
-    # 3. 'autoconfig' A Record
     try {
         Add-DnsServerResourceRecordA -Name "autoconfig" -ZoneName $DomainName -IPv4Address $ServerIP -ErrorAction Stop
         Write-Host "    [+] 'autoconfig' A Record created." -ForegroundColor Green
     } catch { Write-Host "    [!] 'autoconfig' A Record exists." -ForegroundColor Yellow }
 
-
     # ------------------------------------------------------------------
-    # STEP 2: INSTALL MAILENABLE STANDARD
+    # STEP 2: INSTALL MAILENABLE STANDARD (ROBUST)
     # ------------------------------------------------------------------
     Write-Host "`n[2] Installing MailEnable Standard..." -ForegroundColor Cyan
 
-    if (-not (Test-Path "$MEInstallDir\Bin\MEAdmin.exe")) {
-        # Download
-        Write-Host "    [*] Downloading MailEnable installer (this may take a moment)..."
+    if (-not (Test-Path "$MEBin\MEAdmin.exe")) {
+        
+        # 2a. Download with Size Check
+        Write-Host "    [*] Downloading MailEnable installer..."
         try {
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            Invoke-WebRequest -Uri $MEDownloadUrl -OutFile $MEInstaller
+            Invoke-WebRequest -Uri $MEDownloadUrl -OutFile $MEInstaller -UseBasicParsing
         } catch {
-            Write-Host "    [ERROR] Download failed. Please download MailEnable Standard manually to $MEInstaller" -ForegroundColor Red
+            Write-Host "    [ERROR] Download failed. Try downloading manually." -ForegroundColor Red
             return
         }
 
-        # Install Silently
-        # /S = Silent, /SysDir = Destination
-        Write-Host "    [*] Running Silent Installer..."
-        Start-Process -FilePath $MEInstaller -ArgumentList "/S" -Wait -NoNewWindow
+        # Check if file is valid (larger than 50MB)
+        $FileItem = Get-Item $MEInstaller
+        if ($FileItem.Length -lt 50000000) {
+            Write-Host "    [ERROR] Downloaded file is too small ($($FileItem.Length / 1MB) MB). It might be corrupt." -ForegroundColor Red
+            Write-Host "    TROUBLESHOOT: Download MailEnable-Standard.exe manually to $env:TEMP" -ForegroundColor Yellow
+            return
+        }
+
+        # 2b. Install Silently
+        Write-Host "    [*] Running Silent Installer (This takes 1-2 minutes)..."
+        $Process = Start-Process -FilePath $MEInstaller -ArgumentList "/S" -PassThru
+        $Process.WaitForExit()
         
-        Write-Host "    [+] Installation Complete." -ForegroundColor Green
+        Write-Host "    [+] Installer finished." -ForegroundColor Green
         
-        # Wait for services to register
-        Start-Sleep -Seconds 10
+        # 2c. Wait for Service Registration
+        Write-Host "    [*] Waiting for system registration..."
+        Start-Sleep -Seconds 20
+
+        # 2d. Force Register COM Libraries (The most common failure point)
+        if (Test-Path "$MEBin\MEInstaller.exe") {
+             Write-Host "    [*] Registering MailEnable Components..."
+             # Command '1' registers components in MEInstaller.exe
+             Start-Process -FilePath "$MEBin\MEInstaller.exe" -ArgumentList "1" -Wait -WindowStyle Hidden
+        }
     } else {
         Write-Host "    [!] MailEnable is already installed. Skipping install." -ForegroundColor Yellow
     }
-
 
     # ------------------------------------------------------------------
     # STEP 3: CONFIGURE POSTOFFICE & USER (via COM API)
     # ------------------------------------------------------------------
     Write-Host "`n[3] Creating Postoffice and Users..." -ForegroundColor Cyan
 
-    # Helper function to create ME Objects
+    # Define Functions
     function New-MEPostOffice {
         param($POName, $Password)
-        
-        # Create Postoffice
-        $oPO = New-Object -ComObject MEAOPO.Postoffice
-        $oPO.Name = $POName
-        $oPO.Status = 1
-        $oPO.Account = $POName
-        if ($oPO.AddPostoffice() -eq 1) { 
-            Write-Host "    [+] Postoffice '$POName' created." -ForegroundColor Green 
-        } else { 
-            Write-Host "    [!] Postoffice '$POName' likely exists." -ForegroundColor Yellow 
-        }
+        try {
+            $oPO = New-Object -ComObject MEAOPO.Postoffice
+            $oPO.Name = $POName
+            $oPO.Status = 1
+            $oPO.Account = $POName
+            if ($oPO.AddPostoffice() -eq 1) { 
+                Write-Host "    [+] Postoffice '$POName' created." -ForegroundColor Green 
+            } else { 
+                Write-Host "    [!] Postoffice '$POName' likely exists." -ForegroundColor Yellow 
+            }
 
-        # Add Domain to Postoffice (maps bmw7216.com -> Postoffice)
-        $oDom = New-Object -ComObject MEAOPO.Domain
-        $oDom.AccountName = $POName
-        $oDom.DomainName = $POName
-        $oDom.Status = 1
-        $oDom.AddDomain() | Out-Null
+            $oDom = New-Object -ComObject MEAOPO.Domain
+            $oDom.AccountName = $POName
+            $oDom.DomainName = $POName
+            $oDom.Status = 1
+            $oDom.AddDomain() | Out-Null
+        } catch {
+            Write-Host "    [ERROR] COM Object Failure. MailEnable libraries not registered." -ForegroundColor Red
+            throw
+        }
     }
 
     function New-MEMailbox {
         param($POName, $MailboxName, $Password)
-
-        # 1. Create Mailbox (The storage bucket)
         $oMbox = New-Object -ComObject MEAOPO.Mailbox
         $oMbox.Postoffice = $POName
         $oMbox.Mailbox = $MailboxName
         $oMbox.Limit = -1
-        $oMbox.RedirectAddress = ""
-        $oMbox.RedirectStatus = 0
         $oMbox.Status = 1
         $oMbox.AddMailbox() | Out-Null
 
-        # 2. Create Login (The authentication user/pass)
         $oLogin = New-Object -ComObject MEAOPO.Login
         $oLogin.Account = $POName
-        $oLogin.Description = "Student User"
         $oLogin.Password = $Password
         $oLogin.Rights = "USER"
         $oLogin.Status = 1
         $oLogin.UserName = "$MailboxName@$POName"
         $oLogin.AddLogin() | Out-Null
 
-        # 3. Create Address Map (Links email address to mailbox)
         $oMap = New-Object -ComObject MEAOPO.AddressMap
         $oMap.Account = $POName
         $oMap.DestinationAddress = "[SF:$POName/$MailboxName]"
         $oMap.SourceAddress = "[SMTP:$MailboxName@$POName]"
         $oMap.AddAddressMap() | Out-Null
         
-        Write-Host "    [+] User '$MailboxName@$POName' created with password '$Password'." -ForegroundColor Green
+        Write-Host "    [+] User '$MailboxName@$POName' created." -ForegroundColor Green
     }
 
-    # --- Execute Configuration ---
+    # Execute
     try {
-        # Create PO: bmw7216.com
-        New-MEPostOffice -POName $DomainName -Password "P@ssword123" # PO Admin password
-        
-        # Create User: student / student
+        New-MEPostOffice -POName $DomainName -Password "P@ssword123"
         New-MEMailbox -POName $DomainName -MailboxName "student" -Password "student"
     }
     catch {
-        Write-Host "    [ERROR] Failed to configure MailEnable objects. Is the installation finished?" -ForegroundColor Red
-        Write-Host "    Details: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "    [ERROR] Configuration failed. Steps to fix:" -ForegroundColor Red
+        Write-Host "    1. Open 'MailEnable Installer' from Start Menu." -ForegroundColor Yellow
+        Write-Host "    2. Select 'Common Installation' -> 'Register Components' -> Execute." -ForegroundColor Yellow
+        Write-Host "    3. Re-run this script." -ForegroundColor Yellow
     }
 
-
     # ------------------------------------------------------------------
-    # STEP 4: IIS AUTOCONFIG (For Thunderbird)
+    # STEP 4: IIS AUTOCONFIG
     # ------------------------------------------------------------------
     Write-Host "`n[4] Configuring IIS Autoconfig Service..." -ForegroundColor Cyan
 
-    # Install IIS if missing
     if (-not (Get-WindowsFeature Web-Server).Installed) {
         Install-WindowsFeature Web-Server -IncludeManagementTools | Out-Null
     }
 
-    # Create Directory
     New-Item -Path $AutoConfigDir -ItemType Directory -Force | Out-Null
 
-    # Create XML
     $XmlContent = @"
 <?xml version="1.0" encoding="UTF-8"?>
 <clientConfig version="1.1">

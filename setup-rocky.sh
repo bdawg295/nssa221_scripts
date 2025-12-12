@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# RIT NSSA221 - Robust Unified Server Setup Script (v3.0)
+# RIT NSSA221 - Robust Unified Server Setup Script (v4.0)
 # Target System: Rocky Linux 8
 #
 # INCLUDES:
@@ -10,6 +10,8 @@
 # 3. MENU: Apache Virtual Web Server (Lab 06)
 # 4. MENU: Rsync Daemon Configuration (Lab 05)
 # 5. MENU: Samba File Sharing (Lab 05)
+# 6. MENU: FTP Server (vsftpd)
+# 7. MENU: NFS Server (nfs-utils)
 # ==============================================================================
 
 # --- Helper Functions ---
@@ -105,8 +107,17 @@ setup_raid() {
     log "STARTING MODULE: RAID CONFIGURATION (Lab 04)"
     echo "----------------------------------------------------------------"
 
+    # Check for drives (adjust names if using sdb/sdc)
     if [ ! -e /dev/nvme0n3 ] || [ ! -e /dev/nvme0n4 ]; then
-        error_exit "Required drives for RAID 1 (/dev/nvme0n3, /dev/nvme0n4) not found!"
+        warn "Standard NVMe drives not found. Checking for SATA (sdb/sdc)..."
+        if [ ! -e /dev/sdb ] || [ ! -e /dev/sdc ]; then
+             error_exit "No suitable drives found for RAID 1."
+        fi
+        DISK1="/dev/sdb"
+        DISK2="/dev/sdc"
+    else
+        DISK1="/dev/nvme0n3"
+        DISK2="/dev/nvme0n4"
     fi
 
     log "Installing RAID tools..."
@@ -117,8 +128,8 @@ setup_raid() {
     if [ -e /dev/md0 ]; then
         warn "RAID 1 (/dev/md0) already exists. Skipping creation."
     else
-        log "Creating RAID 1 (/dev/md0)..."
-        yes | mdadm --create /dev/md0 --level=1 --raid-devices=2 /dev/nvme0n3 /dev/nvme0n4 > /dev/null 2>&1
+        log "Creating RAID 1 (/dev/md0) using $DISK1 and $DISK2..."
+        yes | mdadm --create /dev/md0 --level=1 --raid-devices=2 $DISK1 $DISK2 > /dev/null 2>&1
         check_command
         sleep 5
         
@@ -160,9 +171,16 @@ FDISK
         warn "RAID 5 (/dev/md1) already exists. Skipping creation."
     else
         log "Creating RAID 5 (/dev/md1)..."
-        if [ ! -e /dev/nvme0n5 ]; then error_exit "Drive /dev/nvme0n5 missing for RAID 5"; fi
-        
-        yes | mdadm --create /dev/md1 --level=5 --raid-devices=3 /dev/nvme0n5 /dev/nvme0n6 /dev/nvme0n7 > /dev/null 2>&1
+        # Determine drives for RAID 5
+        if [ -e /dev/nvme0n5 ]; then
+             R5D1="/dev/nvme0n5"; R5D2="/dev/nvme0n6"; R5D3="/dev/nvme0n7"
+        elif [ -e /dev/sdd ]; then
+             R5D1="/dev/sdd"; R5D2="/dev/sde"; R5D3="/dev/sdf"
+        else
+             error_exit "Drives for RAID 5 missing."
+        fi
+
+        yes | mdadm --create /dev/md1 --level=5 --raid-devices=3 $R5D1 $R5D2 $R5D3 > /dev/null 2>&1
         check_command
         sleep 5
         
@@ -229,9 +247,9 @@ setup_webserver() {
     log "STARTING MODULE: VIRTUAL WEB SERVER (Lab 06)"
     echo "----------------------------------------------------------------"
 
-    DOMAIN="gpavks.com"
-    VHOST1="starlord.${DOMAIN}"
-    VHOST2="gamora.${DOMAIN}"
+    DOMAIN="bmw7216.com"
+    VHOST1="redbull.${DOMAIN}"
+    VHOST2="audi.${DOMAIN}"
 
     log "Installing Apache..."
     dnf install -y httpd > /dev/null
@@ -316,8 +334,8 @@ setup_rsyncd() {
     log "STARTING MODULE: RSYNC DAEMON (Lab 05)"
     echo "----------------------------------------------------------------"
 
-    log "Installing Rsync and daemon..."
-    dnf install -y rsync > /dev/null
+    log "Installing Rsync and Daemon..."
+    # FIX: Ensure rsync-daemon package is installed (RHEL 8/9 requirement)
     dnf install -y rsync rsync-daemon > /dev/null
     check_command
 
@@ -382,15 +400,11 @@ setup_samba() {
     firewall-cmd --reload > /dev/null 2>&1
 
     # --- Directory Setup ---
-    # Lab 5 uses /media/samba/ramones. We assume /media/samba exists from RAID setup.
-    # If not, we create it just in case.
     SHARE_DIR="/media/samba/ramones"
-    
     log "Creating shared directory: $SHARE_DIR"
     mkdir -p $SHARE_DIR
     
     # --- Group Setup ---
-    # Lab 5 requires a 'writers' group [cite: 1675]
     if ! getent group writers > /dev/null; then
         log "Creating group 'writers'..."
         groupadd writers
@@ -399,11 +413,9 @@ setup_samba() {
     fi
 
     # --- Permissions ---
-    # Lab 5 requires group ownership and write permissions [cite: 1696-1699]
     log "Setting directory permissions..."
     chgrp writers $SHARE_DIR
     chmod g+rwx $SHARE_DIR
-    # SGID is good practice here (2770), but lab explicitly asked for chmod g+rwx
     chmod 2770 $SHARE_DIR
 
     # --- SELinux Context ---
@@ -414,7 +426,6 @@ setup_samba() {
     # --- User Creation Loop ---
     echo ""
     echo "--- Samba User Setup ---"
-    echo "Lab 5 suggests creating users like: joey, johnny, deedee"
     read -p "How many Samba users do you want to create? " USER_COUNT < /dev/tty
 
     if [[ "$USER_COUNT" =~ ^[0-9]+$ ]]; then
@@ -422,7 +433,6 @@ setup_samba() {
             echo ""
             read -p "Enter username #$i: " SMB_USER < /dev/tty
             
-            # Create system user (nologin) 
             if id "$SMB_USER" &>/dev/null; then
                 log "System user $SMB_USER already exists."
             else
@@ -430,11 +440,8 @@ setup_samba() {
                 log "Created system user $SMB_USER"
             fi
 
-            # Add to 'writers' group [cite: 1679]
             usermod -aG writers $SMB_USER
             log "Added $SMB_USER to 'writers' group."
-
-            # Set Samba Password [cite: 1689]
             log "Set Samba password for $SMB_USER:"
             smbpasswd -a $SMB_USER
         done
@@ -444,12 +451,10 @@ setup_samba() {
 
     # --- Config smb.conf ---
     SMB_CONF="/etc/samba/smb.conf"
-    
     if grep -q "\[ramones\]" "$SMB_CONF"; then
         warn "Share [ramones] already exists in smb.conf. Skipping config append."
     else
         log "Appending [ramones] share to $SMB_CONF..."
-        # Configuration per Lab 5 
         cat <<EOF >> "$SMB_CONF"
 
 [ramones]
@@ -472,6 +477,117 @@ EOF
 }
 
 # ==============================================================================
+# MODULE 5: FTP SERVER (vsftpd)
+# ==============================================================================
+setup_ftp() {
+    echo "----------------------------------------------------------------"
+    log "STARTING MODULE: FTP SERVER (vsftpd)"
+    echo "----------------------------------------------------------------"
+
+    # 1. Install vsftpd
+    log "Installing vsftpd..."
+    dnf install -y vsftpd ftp > /dev/null
+    check_command
+
+    # 2. Configure vsftpd.conf
+    CONF="/etc/vsftpd/vsftpd.conf"
+    cp $CONF "${CONF}.bak"
+
+    log "Configuring $CONF..."
+    cat <<EOF > $CONF
+anonymous_enable=NO
+local_enable=YES
+write_enable=YES
+local_umask=022
+dirmessage_enable=YES
+xferlog_enable=YES
+connect_from_port_20=YES
+xferlog_std_format=YES
+listen=NO
+listen_ipv6=YES
+pam_service_name=vsftpd
+userlist_enable=YES
+chroot_local_user=YES
+allow_writeable_chroot=YES
+EOF
+
+    # 3. Firewall
+    log "Opening Firewall for FTP..."
+    firewall-cmd --permanent --add-service=ftp > /dev/null 2>&1
+    firewall-cmd --reload > /dev/null
+
+    # 4. SELinux
+    log "Setting SELinux booleans (takes a moment)..."
+    setsebool -P ftpd_full_access 1
+
+    # 5. Local Test User
+    if id "ftpclient" &>/dev/null; then
+        log "User 'ftpclient' already exists."
+    else
+        log "Creating local test user 'ftpclient'..."
+        useradd ftpclient
+        echo "ftpclient" | passwd --stdin ftpclient > /dev/null
+    fi
+
+    # 6. Start Service
+    log "Starting vsftpd..."
+    systemctl enable --now vsftpd
+    systemctl restart vsftpd
+    check_command
+
+    log "FTP Setup Complete!"
+}
+
+# ==============================================================================
+# MODULE 6: NFS SERVER (nfs-utils)
+# ==============================================================================
+setup_nfs() {
+    echo "----------------------------------------------------------------"
+    log "STARTING MODULE: NFS SERVER"
+    echo "----------------------------------------------------------------"
+
+    # 1. Install NFS Utils
+    log "Installing NFS Utilities..."
+    dnf install -y nfs-utils > /dev/null
+    check_command
+
+    # 2. Create Share Directory
+    SHARE_DIR="/media/nfs"
+    log "Creating share directory: $SHARE_DIR"
+    mkdir -p $SHARE_DIR
+    
+    # Permissions (Open for lab testing)
+    chmod 777 $SHARE_DIR
+    chown nobody:nobody $SHARE_DIR
+    echo "NFS Share is working!" > "$SHARE_DIR/test_file.txt"
+
+    # 3. Configure Exports
+    SUBNET="192.168.1.0/24" 
+    
+    if grep -q "$SHARE_DIR" /etc/exports; then
+        warn "Export already exists in /etc/exports"
+    else
+        log "Adding export for subnet $SUBNET..."
+        echo "$SHARE_DIR $SUBNET(rw,sync,no_root_squash)" >> /etc/exports
+    fi
+
+    # 4. Firewall
+    log "Opening Firewall for NFS..."
+    firewall-cmd --permanent --add-service=nfs > /dev/null 2>&1
+    firewall-cmd --permanent --add-service=mountd > /dev/null 2>&1
+    firewall-cmd --permanent --add-service=rpc-bind > /dev/null 2>&1
+    firewall-cmd --reload > /dev/null
+
+    # 5. Start Services
+    log "Starting NFS Server..."
+    systemctl enable --now nfs-server
+    exportfs -r
+    check_command
+
+    log "NFS Setup Complete!"
+}
+
+# ==============================================================================
 # MAIN EXECUTION
 # ==============================================================================
 
@@ -490,25 +606,31 @@ while true; do
     echo "2. Run Virtual Web Server Setup (Lab 06)"
     echo "3. Run Rsync Daemon Setup (Lab 05)"
     echo "4. Run Samba File Sharing Setup (Lab 05)"
-    echo "5. Run ALL Server Modules (1-4)"
-    echo "6. Exit"
+    echo "5. Run FTP Server Setup (vsftpd)"
+    echo "6. Run NFS Server Setup"
+    echo "7. Run ALL Server Modules (1-6)"
+    echo "8. Exit"
     echo "==================================================="
     
-    # FIX 1: Force read from TTY to prevent infinite loop on EOF
-    read -p "Select an option [1-6]: " choice < /dev/tty
+    # Force read from TTY to prevent infinite loop
+    read -p "Select an option [1-8]: " choice < /dev/tty
 
     case $choice in
         1) setup_raid ;;
         2) setup_webserver ;;
         3) setup_rsyncd ;;
         4) setup_samba ;;
-        5) 
+        5) setup_ftp ;;
+        6) setup_nfs ;;
+        7) 
            setup_raid
            setup_webserver
            setup_rsyncd
            setup_samba
+           setup_ftp
+           setup_nfs
            ;;
-        6) 
+        8) 
            log "Exiting."
            exit 0 
            ;;
@@ -518,6 +640,5 @@ while true; do
     esac
     
     echo ""
-    # FIX 2: Force read from TTY here as well
     read -p "Press Enter to continue..." < /dev/tty
 done
